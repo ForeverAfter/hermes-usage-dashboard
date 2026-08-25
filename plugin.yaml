@@ -1,0 +1,5 @@
+name: usage-dashboard
+version: 1.3.2
+description: "Local subscription usage dashboard for OpenAI Codex, Claude Code, Kimi/Moonshot, ZCode/Z.ai, and Nous Research."
+author: "ForeverAfter"
+kind: standalone

@@ -1,0 +1,14 @@
+{
+  "name": "usage-dashboard",
+  "label": "AI Usage",
+  "description": "Subscription usage and limits for OpenAI Codex, Claude Code, Kimi/Moonshot, ZCode/Z.ai, and Nous Research",
+  "icon": "Graph",
+  "version": "1.3.2",
+  "tab": {
+    "path": "/subscription-usage",
+    "hidden": true
+  },
+  "slots": [],
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}
