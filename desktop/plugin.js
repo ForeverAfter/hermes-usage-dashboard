@@ -45,13 +45,12 @@ function formatDate(value) {
 function selectableWindows(data) {
   return (data?.providers || []).flatMap(provider =>
     (provider.windows || [])
-      .filter(window => window.remaining_percent != null)
       .map(window => ({
         value: `${provider.provider}::${window.label}`,
         providerId: provider.provider,
         provider: provider.label,
         window: window.label,
-        remaining: clamp(window.remaining_percent)
+        remaining: window.remaining_percent == null ? null : clamp(window.remaining_percent)
       }))
   )
 }
@@ -91,10 +90,18 @@ function useActiveRuntime() {
   }
 }
 
-function lowestOption(options) {
-  return options.reduce((lowest, option) => {
-    if (!lowest || option.remaining < lowest.remaining) return option
-    return lowest
+function windowPriority(label) {
+  const name = String(label || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  if (/session|sesion|5\s*[- ]?\s*(?:hour|hora|h\b)/.test(name)) return 0
+  if (/week|semana/.test(name)) return 1
+  if (/month|mensual|subscription period/.test(name)) return 2
+  return 3
+}
+
+function priorityOption(options) {
+  return options.reduce((preferred, option) => {
+    if (!preferred || windowPriority(option.window) < windowPriority(preferred.window)) return option
+    return preferred
   }, null)
 }
 
@@ -103,13 +110,14 @@ function selectedStatus(data, selection, runtime) {
   const automaticOptions = runtime?.usageProvider
     ? options.filter(option => option.providerId === runtime.usageProvider)
     : []
-  const automatic = lowestOption(automaticOptions)
+  const automatic = priorityOption(automaticOptions)
 
   if (selection === AUTO_SELECTION) {
     return { selected: automatic, fellBack: false, automatic: true }
   }
 
-  const explicit = options.find(option => option.value === selection)
+  const pinnedProvider = typeof selection === 'string' ? selection.split('::')[0] : null
+  const explicit = priorityOption(options.filter(option => option.providerId === pinnedProvider))
   return {
     selected: explicit || automatic,
     fellBack: !explicit,
@@ -122,11 +130,41 @@ function persistSelection(value) {
   pluginCtx?.storage.set(SELECTION_KEY, value)
 }
 
+function sanitizeWindow(window) {
+  return {
+    label: typeof window?.label === 'string' ? window.label : '',
+    used_percent: Number.isFinite(window?.used_percent) ? window.used_percent : null,
+    remaining_percent: Number.isFinite(window?.remaining_percent) ? window.remaining_percent : null,
+    reset_at: typeof window?.reset_at === 'string' ? window.reset_at : null,
+    detail: typeof window?.detail === 'string' ? window.detail : null
+  }
+}
+
+function sanitizeProvider(provider) {
+  return {
+    provider: typeof provider?.provider === 'string' ? provider.provider : '',
+    label: typeof provider?.label === 'string' ? provider.label : '',
+    available: Boolean(provider?.available),
+    plan: typeof provider?.plan === 'string' ? provider.plan : null,
+    source: typeof provider?.source === 'string' ? provider.source : 'local',
+    fetched_at: typeof provider?.fetched_at === 'string' ? provider.fetched_at : null,
+    renewal_at: typeof provider?.renewal_at === 'string' ? provider.renewal_at : null,
+    stale: Boolean(provider?.stale),
+    local: Boolean(provider?.local),
+    usage_fallback: Boolean(provider?.usage_fallback),
+    usage_fallback_reason:
+      typeof provider?.usage_fallback_reason === 'string' ? provider.usage_fallback_reason : null,
+    windows: Array.isArray(provider?.windows) ? provider.windows.map(sanitizeWindow) : [],
+    details: Array.isArray(provider?.details) ? provider.details.filter(detail => typeof detail === 'string') : [],
+    reason: typeof provider?.reason === 'string' ? provider.reason : null
+  }
+}
+
 function sanitizedUsage(payload) {
   return JSON.parse(JSON.stringify({
     fetched_at: payload?.fetched_at || null,
     summary: payload?.summary || null,
-    providers: Array.isArray(payload?.providers) ? payload.providers : [],
+    providers: Array.isArray(payload?.providers) ? payload.providers.map(sanitizeProvider) : [],
     privacy: typeof payload?.privacy === 'string' ? payload.privacy : null
   }))
 }
@@ -266,7 +304,7 @@ function CompactWindow({ provider, window, selectedValue }) {
                 ),
                 type: 'button',
                 'aria-pressed': selected,
-                title: selected ? 'This percentage is shown in the status bar' : 'Show this percentage in the status bar',
+                title: 'Pin this provider to the status bar (session / 5 hours, then weekly, then monthly)',
                 onClick: chooseForStatus,
                 children: `${selected ? '● ' : ''}${formatPercent(window.remaining_percent)} remaining`
               })
@@ -290,6 +328,7 @@ function CompactWindow({ provider, window, selectedValue }) {
 
 function CompactProvider({ provider, selectedValue }) {
   const fetched = formatDate(provider.fetched_at)
+  const renewal = formatDate(provider.renewal_at)
   const badge = provider.usage_fallback || provider.stale
     ? 'STALE'
     : provider.local
@@ -311,7 +350,13 @@ function CompactProvider({ provider, selectedValue }) {
               jsx('div', {
                 className: 'truncate text-[0.6875rem] text-(--ui-text-tertiary)',
                 children: provider.plan || 'Plan not identified'
-              })
+              }),
+              renewal
+                ? jsx('div', {
+                    className: 'truncate text-[0.625rem] text-(--ui-text-quaternary)',
+                    children: `Plan renewal / cutoff ${renewal}`
+                  })
+                : null
             ]
           }),
           jsx('span', {
@@ -428,8 +473,8 @@ function UsageCompactPanel() {
                       children: selection === AUTO_SELECTION
                         ? `Automatic · ${selectedForBar?.provider || runtime.provider || 'no linked quota'}`
                         : selectedForBar
-                          ? `Pinned · ${selectedForBar.provider} · ${selectedForBar.window}${fellBack ? ' (fallback)' : ''}`
-                          : 'Pinned · data unavailable'
+                          ? `Pinned provider · ${selectedForBar.provider} · ${selectedForBar.window}${fellBack ? ' (fallback)' : ''}`
+                          : 'Pinned provider · data unavailable'
                     }),
                     selection !== AUTO_SELECTION
                       ? jsx('button', {
@@ -452,7 +497,7 @@ function UsageCompactPanel() {
               title: runtime.model || undefined,
               children: selection === AUTO_SELECTION
                 ? `Current model: ${runtime.model || 'unknown'}`
-                : 'Click any percentage to pin it to the status bar.'
+                : 'Click any percentage to pin its provider: session / 5 hours, then weekly, then monthly.'
             })
           ]
         })
@@ -501,9 +546,9 @@ function UsageStatusLabel() {
   const runtimeLabel = runtime.provider || runtime.model || 'unidentified provider'
   return jsx('span', {
     title: selected
-      ? `${selection === AUTO_SELECTION ? 'Automatic' : 'Pinned'} · ${runtimeLabel} · ${selected.provider} · ${selected.window}${fellBack ? ' · previous selection unavailable' : ''}`
+      ? `${selection === AUTO_SELECTION ? 'Automatic' : 'Pinned provider'} · ${runtimeLabel} · ${selected.provider} · ${selected.window}${fellBack ? ' · previous selection unavailable' : ''}`
       : `Automatic · ${runtimeLabel} · no linked quota`,
-    children: selected ? `AI ${formatPercent(selected.remaining)}` : 'AI —'
+    children: selected?.remaining != null ? `AI ${formatPercent(selected.remaining)}` : 'AI —'
   })
 }
 

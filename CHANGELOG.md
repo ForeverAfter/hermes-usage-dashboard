@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- Preserve the Hermes profile secret scope and home context in parallel collectors.
+- Establish the launch-profile scope for unscoped plugin requests without disabling fail-closed protection.
+- Isolate launch-profile caches from requests with an existing secret scope.
+- Prioritize five-hour/current-session windows, then weekly, monthly, and other windows in cards and the status chip, including saved provider selections.
+- Keep a present session window with unavailable usage honest instead of substituting weekly usage.
+- Use the current Hermes Codex backend URL helper.
+- Label Z.ai monthly MCP quotas only for the verified type/unit/number combination.
+- Recover Claude plan labels from allowlisted local metadata for launch-profile requests.
+
+### Added
+
+- Deep allowlists for backend responses and frontend cached payloads.
+- A fixed, sanitized diagnostic category for missing profile scope.
+- Optional plan-renewal display support, distinct from quota-window resets.
+- Context propagation, isolation, restoration, and real-core offline regression tests.
+- Executable Node tests for status-chip selection and window priority.
+
+### Limitations
+
+- Existing request scopes bypass launch caches, which may increase provider requests.
+- The optional Kimi Desktop log fallback remains local to the operating-system user; complete cross-account isolation is not claimed.
+
 ## [1.3.2] - 2026-08-25
 
 ### Added

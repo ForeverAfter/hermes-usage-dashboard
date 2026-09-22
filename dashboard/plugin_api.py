@@ -11,6 +11,8 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
+from contextvars import ContextVar, copy_context
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -46,6 +48,8 @@ _COLLECT_LOCK = threading.Lock()
 _ANTHROPIC_CACHE_FILE = _hermes_root() / "cache" / "usage-dashboard" / "anthropic.json"
 _ANTHROPIC_FRESH_SECONDS = 300.0
 _ANTHROPIC_STALE_SECONDS = 86_400.0
+_USE_PROCESS_CACHE: ContextVar[bool] = ContextVar("usage_process_cache", default=True)
+_ANTHROPIC_CACHE_PATH: ContextVar[Optional[Path]] = ContextVar("usage_anthropic_cache_path", default=None)
 
 
 def _now() -> datetime:
@@ -54,6 +58,46 @@ def _now() -> datetime:
 
 def _iso(value: Optional[datetime]) -> Optional[str]:
     return value.astimezone(timezone.utc).isoformat() if value else None
+
+
+def _window_order(window: dict[str, Any]) -> int:
+    label = str(window.get("label") or "").casefold()
+    if (
+        "5-hour" in label
+        or "five hour" in label
+        or "5 horas" in label
+        or label in {"session", "current session", "sesión", "sesión actual"}
+    ):
+        return 0
+    if "week" in label or "semana" in label:
+        return 1
+    if (
+        "month" in label
+        or "mensual" in label
+        or "subscription period" in label
+        or "periodo de suscripción" in label
+    ):
+        return 2
+    return 3
+
+
+def _anthropic_plan_from_claude_config(path: Optional[Path] = None) -> Optional[str]:
+    try:
+        data = json.loads((path or Path.home() / ".claude.json").read_text(encoding="utf-8"))
+        account = data.get("oauthAccount") if isinstance(data, dict) else None
+        organization_type = (
+            str(account.get("organizationType") or "").casefold()
+            if isinstance(account, dict)
+            else ""
+        )
+        return {
+            "claude_max": "Max",
+            "claude_pro": "Pro",
+            "claude_team": "Team",
+            "claude_enterprise": "Enterprise",
+        }.get(organization_type)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
 
 
 def _unavailable(provider: str, label: str, reason: str, source: str = "local") -> dict[str, Any]:
@@ -67,6 +111,42 @@ def _unavailable(provider: str, label: str, reason: str, source: str = "local") 
         "windows": [],
         "details": [],
         "reason": reason[:240],
+    }
+
+
+def _public_window(window: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "label": str(window.get("label") or ""),
+        "used_percent": window.get("used_percent") if isinstance(window.get("used_percent"), (int, float)) else None,
+        "remaining_percent": (
+            window.get("remaining_percent")
+            if isinstance(window.get("remaining_percent"), (int, float))
+            else None
+        ),
+        "reset_at": window.get("reset_at") if isinstance(window.get("reset_at"), str) else None,
+        "detail": window.get("detail") if isinstance(window.get("detail"), str) else None,
+    }
+
+
+def _public_card(card: dict[str, Any]) -> dict[str, Any]:
+    windows = card.get("windows") if isinstance(card.get("windows"), list) else []
+    details = card.get("details") if isinstance(card.get("details"), list) else []
+    return {
+        "provider": str(card.get("provider") or ""),
+        "label": str(card.get("label") or card.get("provider") or ""),
+        "available": bool(card.get("available")),
+        "plan": card.get("plan") if isinstance(card.get("plan"), str) else None,
+        "source": str(card.get("source") or "local"),
+        "fetched_at": card.get("fetched_at") if isinstance(card.get("fetched_at"), str) else None,
+        "renewal_at": card.get("renewal_at") if isinstance(card.get("renewal_at"), str) else None,
+        "stale": bool(card.get("stale")),
+        "local": bool(card.get("local")),
+        "windows": [_public_window(window) for window in windows if isinstance(window, dict)],
+        "details": [detail for detail in details if isinstance(detail, str)],
+        "reason": card.get("reason") if isinstance(card.get("reason"), str) else None,
+        "failure_category": (
+            "missing_profile_scope" if card.get("failure_category") == "missing_profile_scope" else None
+        ),
     }
 
 
@@ -112,8 +192,11 @@ def _snapshot_card(provider: str, label: str) -> dict[str, Any]:
 
 
 def _read_anthropic_cache(max_age: float) -> Optional[dict[str, Any]]:
+    if not _USE_PROCESS_CACHE.get():
+        return None
     try:
-        entry = json.loads(_ANTHROPIC_CACHE_FILE.read_text(encoding="utf-8"))
+        path = _ANTHROPIC_CACHE_PATH.get() or _ANTHROPIC_CACHE_FILE
+        entry = json.loads(path.read_text(encoding="utf-8"))
         saved_at = float(entry.get("saved_at") or 0.0)
         card = entry.get("card")
         if time.time() - saved_at > max_age or not isinstance(card, dict):
@@ -126,31 +209,43 @@ def _read_anthropic_cache(max_age: float) -> Optional[dict[str, Any]]:
 
 
 def _write_anthropic_cache(card: dict[str, Any]) -> None:
-    if not card.get("available") or not card.get("windows"):
+    if not _USE_PROCESS_CACHE.get() or not card.get("available") or not card.get("windows"):
         return
     try:
-        _ANTHROPIC_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        temporary = _ANTHROPIC_CACHE_FILE.with_suffix(".tmp")
+        path = _ANTHROPIC_CACHE_PATH.get() or _ANTHROPIC_CACHE_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
         temporary.write_text(
             json.dumps({"saved_at": time.time(), "card": card}, ensure_ascii=False),
             encoding="utf-8",
         )
-        temporary.replace(_ANTHROPIC_CACHE_FILE)
+        temporary.replace(path)
     except OSError:
         pass
+
+
+def _with_anthropic_plan(card: dict[str, Any]) -> dict[str, Any]:
+    if not _USE_PROCESS_CACHE.get():
+        return card  # The launch user's Claude metadata is not a routed account's plan.
+    plan = _anthropic_plan_from_claude_config()
+    if plan:
+        card["plan"] = plan
+    return card
 
 
 def _anthropic_card() -> dict[str, Any]:
     fresh = _read_anthropic_cache(_ANTHROPIC_FRESH_SECONDS)
     if fresh is not None:
         fresh["source"] = "oauth_usage_api-cache"
-        return fresh
+        return _with_anthropic_plan(fresh)
 
     failure_reason = "Claude Code usage could not be queried temporarily."
     try:
         from agent.account_usage import _fetch_anthropic_account_usage
 
-        card = _snapshot_to_card("anthropic", "Claude Code", _fetch_anthropic_account_usage())
+        card = _with_anthropic_plan(
+            _snapshot_to_card("anthropic", "Claude Code", _fetch_anthropic_account_usage())
+        )
         if card.get("available"):
             _write_anthropic_cache(card)
             return card
@@ -162,16 +257,41 @@ def _anthropic_card() -> dict[str, Any]:
             if status == 429
             else f"Anthropic temporarily rejected the usage request (HTTP {status})."
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        try:
+            from agent.secret_scope import UnscopedSecretError
+        except ImportError:
+            pass  # Older Hermes has no scoped-secret error type.
+        else:
+            if isinstance(exc, UnscopedSecretError):
+                # This is an internal scope failure, not logout or rate limiting.
+                # Do not hide it behind a stale account card or expose exc text.
+                card = _unavailable(
+                    "anthropic", "Claude Code",
+                    "Claude Code usage requires an active Hermes profile scope.",
+                    "oauth_usage_api",
+                )
+                card["failure_category"] = "missing_profile_scope"
+                return card
 
     stale = _read_anthropic_cache(_ANTHROPIC_STALE_SECONDS)
     if stale is not None:
         stale["source"] = "oauth_usage_api-cache"
         stale["stale"] = True
         stale["details"] = list(stale.get("details") or []) + [failure_reason]
-        return stale
-    return _unavailable("anthropic", "Claude Code", failure_reason, "oauth_usage_api")
+        return _with_anthropic_plan(stale)
+    return _with_anthropic_plan(
+        _unavailable("anthropic", "Claude Code", failure_reason, "oauth_usage_api")
+    )
+
+
+def _renewal_from_details(details: list[str]) -> Optional[str]:
+    for raw in details:
+        text = str(raw)
+        for prefix in ("Renews:", "Next renewal:"):
+            if text.startswith(prefix):
+                return _normalized_reset(text[len(prefix):].strip())
+    return None
 
 
 def _nous_card() -> dict[str, Any]:
@@ -249,7 +369,7 @@ def _codex_card() -> dict[str, Any]:
     """
     try:
         try:
-            from agent.account_usage import _resolve_codex_usage_credentials, _resolve_codex_usage_url
+            from agent.account_usage import _codex_backend_urls, _resolve_codex_usage_credentials
         except (ImportError, AttributeError):
             return _snapshot_card("openai-codex", "OpenAI Codex")
 
@@ -262,7 +382,7 @@ def _codex_card() -> dict[str, Any]:
         if account_id:
             headers["ChatGPT-Account-Id"] = account_id
         with httpx.Client(timeout=15.0) as client:
-            response = client.get(_resolve_codex_usage_url(base_url), headers=headers)
+            response = client.get(_codex_backend_urls(base_url)[0], headers=headers)
             response.raise_for_status()
         payload = response.json() or {}
         rate_limit = payload.get("rate_limit") or {}
@@ -605,6 +725,8 @@ def _zai_card() -> dict[str, Any]:
                 detail_parts.append(f"{remaining:g} remaining")
             if isinstance(total, (int, float)):
                 detail_parts.append(f"out of {total:g}")
+            if not detail_parts and isinstance(used, (int, float)) and used >= 100.0:
+                detail_parts.append("Z.ai reports this quota as fully used")
             limit_type = str(limit.get("type") or "").upper()
             unit = limit.get("unit")
             number = limit.get("number")
@@ -613,8 +735,8 @@ def _zai_card() -> dict[str, Any]:
                 window_label = "5-hour window"
             elif limit_type == "TOKENS_LIMIT" and unit == 6 and number == 1:
                 window_label = "Weekly window"
-            elif limit_type == "TIME_LIMIT":
-                window_label = "Subscription period"
+            elif limit_type == "TIME_LIMIT" and unit == 5 and number == 1:
+                window_label = "Monthly MCP quota"
             else:
                 window_label = f"Plan limit ({number or '?'}/{unit or '?'})"
             windows.append(
@@ -678,7 +800,7 @@ def _collect() -> dict[str, Any]:
     }
     cards: dict[str, dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=5, thread_name_prefix="usage-dashboard") as pool:
-        futures = {pool.submit(fn): key for key, fn in jobs.items()}
+        futures = {pool.submit(copy_context().run, fn): key for key, fn in jobs.items()}
         for future in as_completed(futures):
             key = futures[future]
             try:
@@ -686,7 +808,11 @@ def _collect() -> dict[str, Any]:
             except Exception:
                 cards[key] = _unavailable(key, key, "Unexpected error while querying this provider.")
 
-    ordered = [cards[key] for key in ("openai-codex", "anthropic", "kimi", "zai", "nous")]
+    ordered = [_public_card(cards[key]) for key in ("openai-codex", "anthropic", "kimi", "zai", "nous")]
+    for card in ordered:
+        windows = card.get("windows")
+        if isinstance(windows, list):
+            card["windows"] = sorted(windows, key=_window_order)
     remaining_values = [
         window["remaining_percent"]
         for card in ordered
@@ -706,8 +832,54 @@ def _collect() -> dict[str, Any]:
     }
 
 
+@contextmanager
+def _usage_scope():
+    """Bind only the process launch scope; never replace a caller's scope/home.
+
+    Old cores without the scope API retain their original resolver behavior.
+    An incomplete modern API must fail closed, not fall back to ambient secrets.
+    """
+    try:
+        from agent.secret_scope import current_secret_scope, reset_secret_scope, set_secret_scope
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"agent", "agent.secret_scope"}:
+            raise
+        yield
+        return
+    if current_secret_scope() is not None:
+        # Arbitrary request scopes can differ even with the same home. Never
+        # reuse the process response or local Anthropic cache for those scopes.
+        cache_token = _USE_PROCESS_CACHE.set(False)
+        try:
+            yield
+        finally:
+            _USE_PROCESS_CACHE.reset(cache_token)
+        return
+    from hermes_constants import get_hermes_home, get_process_hermes_home
+    from tui_gateway.launch_profile_policy import launch_secret_scope
+
+    home = get_process_hermes_home()
+    if get_hermes_home().resolve() != home.resolve():
+        from agent.secret_scope import UnscopedSecretError
+        raise UnscopedSecretError()
+    token = set_secret_scope(launch_secret_scope(home))
+    path_token = _ANTHROPIC_CACHE_PATH.set(home / "cache" / "usage-dashboard" / "anthropic.json")
+    try:
+        yield
+    finally:
+        _ANTHROPIC_CACHE_PATH.reset(path_token)
+        reset_secret_scope(token)
+
+
 @router.get("/usage")
 def get_usage():
+    with _usage_scope():
+        return _get_usage()
+
+
+def _get_usage():
+    if not _USE_PROCESS_CACHE.get():
+        return _collect()
     now = time.monotonic()
     with _CACHE_LOCK:
         cached = _CACHE.get("payload")
