@@ -846,24 +846,37 @@ def _usage_scope():
             raise
         yield
         return
+    from hermes_constants import get_hermes_home, get_process_hermes_home
+
+    home = get_process_hermes_home()
+    launch_cache = home / "cache" / "usage-dashboard" / "anthropic.json"
     if current_secret_scope() is not None:
-        # Arbitrary request scopes can differ even with the same home. Never
-        # reuse the process response or local Anthropic cache for those scopes.
+        if get_hermes_home().resolve() == home.resolve():
+            # Hermes >= 0.22 binds the launch profile's own scope on every plugin
+            # route. Same home + core-bound scope = launch identity: keep the
+            # deduplicating caches (polling would otherwise hit every provider
+            # API on each request) and never rebind over the caller's scope.
+            path_token = _ANTHROPIC_CACHE_PATH.set(launch_cache)
+            try:
+                yield
+            finally:
+                _ANTHROPIC_CACHE_PATH.reset(path_token)
+            return
+        # A routed (foreign-home) scope is another account: never reuse the
+        # launch response, the launch Anthropic cache or the launch Claude plan.
         cache_token = _USE_PROCESS_CACHE.set(False)
         try:
             yield
         finally:
             _USE_PROCESS_CACHE.reset(cache_token)
         return
-    from hermes_constants import get_hermes_home, get_process_hermes_home
     from tui_gateway.launch_profile_policy import launch_secret_scope
 
-    home = get_process_hermes_home()
     if get_hermes_home().resolve() != home.resolve():
         from agent.secret_scope import UnscopedSecretError
         raise UnscopedSecretError()
     token = set_secret_scope(launch_secret_scope(home))
-    path_token = _ANTHROPIC_CACHE_PATH.set(home / "cache" / "usage-dashboard" / "anthropic.json")
+    path_token = _ANTHROPIC_CACHE_PATH.set(launch_cache)
     try:
         yield
     finally:

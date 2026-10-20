@@ -6,6 +6,7 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- Hermes 0.22+ binds the launch profile's secret scope on plugin routes itself; the plugin now recognizes that core-bound launch scope and keeps its response cache, Anthropic cache, and Claude plan label instead of re-querying every provider on each poll. Routed (foreign-home) profiles still bypass launch caches.
 - Preserve the Hermes profile secret scope and home context in parallel collectors.
 - Establish the launch-profile scope for unscoped plugin requests without disabling fail-closed protection.
 - Isolate launch-profile caches from requests with an existing secret scope.

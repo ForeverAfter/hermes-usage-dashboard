@@ -68,7 +68,37 @@ def test_route_establishes_launch_scope_and_restores_it(tmp_path, monkeypatch, c
     assert core.home.get() is None
 
 
-@pytest.mark.parametrize("routed_home", [False, True])
+def test_core_bound_launch_scope_keeps_launch_caches_and_plan(tmp_path, monkeypatch, core):
+    # Hermes >= 0.22 binds the launch profile's scope on every plugin route itself.
+    backend = load_backend(tmp_path, monkeypatch)
+    monkeypatch.setattr(backend, "_anthropic_plan_from_claude_config", lambda: "Max")
+    calls = []
+    def fetch():
+        calls.append(core.scope.get()["marker"])
+        return sample_snapshot()
+    install_fake_account_usage(monkeypatch, fetch)
+    for name in ("_codex_card", "_kimi_card", "_zai_card", "_nous_card"):
+        monkeypatch.setattr(backend, name, lambda: backend._unavailable("test", "Test", "offline"))
+    scope = {"marker": "core-launch"}
+    st = core.scope.set(scope)
+    ht = core.home.set(core.launch_home)
+    try:
+        first = backend.get_usage()
+        second = backend.get_usage()
+        assert second is first  # process response cache deduplicates polling
+        assert first["providers"][1]["plan"] == "Max"
+        assert calls == ["core-launch"]
+        assert core.scope.get() is scope
+        assert core.home.get() == core.launch_home
+    finally:
+        core.home.reset(ht)
+        core.scope.reset(st)
+    assert core.calls == []  # never rebinds over the core's scope
+    expected = core.launch_home / "cache" / "usage-dashboard" / "anthropic.json"
+    assert expected.is_file()
+
+
+@pytest.mark.parametrize("routed_home", [True])
 def test_existing_scopes_never_share_response_or_anthropic_cache(tmp_path, monkeypatch, core, routed_home):
     backend = load_backend(tmp_path, monkeypatch)
     monkeypatch.setattr(backend, "_anthropic_plan_from_claude_config", lambda: "Launch-only plan")
@@ -238,6 +268,8 @@ def test_installed_core_scope_and_fail_closed_contract(tmp_path, monkeypatch):
         assert secrets.current_secret_scope() is None
         with pytest.raises(secrets.UnscopedSecretError):
             secrets.get_secret("USAGE_DASHBOARD_TEST")
+        # A routed profile (foreign home + its own scope) must never see the launch response.
+        routed_home = constants.set_hermes_home_override(tmp_path / "routed-profile")
         request_token = secrets.set_secret_scope({"USAGE_DASHBOARD_TEST": "request"})
         try:
             result = backend.get_usage()
@@ -245,6 +277,14 @@ def test_installed_core_scope_and_fail_closed_contract(tmp_path, monkeypatch):
             assert secrets.get_secret("USAGE_DASHBOARD_TEST") == "request"
         finally:
             secrets.reset_secret_scope(request_token)
+            constants.reset_hermes_home_override(routed_home)
+        # The launch profile under a core-bound scope (Hermes >= 0.22) reuses its own cache.
+        launch_token = secrets.set_secret_scope(policy.launch_secret_scope(home))
+        try:
+            result = backend.get_usage()
+            assert [card["reason"] for card in result["providers"]] == ["launch"] * 5
+        finally:
+            secrets.reset_secret_scope(launch_token)
     finally:
         secrets.set_multiplex_active(old_mode)
         secrets.reset_secret_scope(st)
