@@ -6,6 +6,8 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- Claude sessions at 1 % or less no longer show as 100 % used right after a 5-hour reset: utilization is read as the percent Anthropic returns (works around upstream Hermes #58226).
+- Cached usage is discarded as soon as any window's reset time passes, so a rolled-over window is never shown from cache.
 - Hermes 0.22+ binds the launch profile's secret scope on plugin routes itself; the plugin now recognizes that core-bound launch scope and keeps its response cache, Anthropic cache, and Claude plan label instead of re-querying every provider on each poll. Routed (foreign-home) profiles still bypass launch caches.
 - Preserve the Hermes profile secret scope and home context in parallel collectors.
 - Establish the launch-profile scope for unscoped plugin requests without disabling fail-closed protection.

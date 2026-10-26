@@ -191,6 +191,30 @@ def _snapshot_card(provider: str, label: str) -> dict[str, Any]:
     return _snapshot_to_card(provider, label, fetch_account_usage(provider))
 
 
+def _window_has_rolled_over(card: dict[str, Any], now: Optional[datetime] = None) -> bool:
+    """True when any cached window's reset time has passed: its percentages describe a
+    window that no longer exists, so the cache must not hide the new one."""
+    now = now or _now()
+    for window in card.get("windows") or []:
+        reset = window.get("reset_at") if isinstance(window, dict) else None
+        if not isinstance(reset, str):
+            continue
+        try:
+            moment = datetime.fromisoformat(reset.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        if moment <= now:
+            return True
+    return False
+
+
+def _payload_has_rolled_over(payload: Any) -> bool:
+    providers = payload.get("providers") if isinstance(payload, dict) else None
+    return any(isinstance(card, dict) and _window_has_rolled_over(card) for card in providers or [])
+
+
 def _read_anthropic_cache(max_age: float) -> Optional[dict[str, Any]]:
     if not _USE_PROCESS_CACHE.get():
         return None
@@ -203,6 +227,8 @@ def _read_anthropic_cache(max_age: float) -> Optional[dict[str, Any]]:
             return None
         if card.get("provider") != "anthropic" or not isinstance(card.get("windows"), list):
             return None
+        if max_age <= _ANTHROPIC_FRESH_SECONDS and _window_has_rolled_over(card):
+            return None  # a fresh-cache hit must never outlive the window it describes
         return json.loads(json.dumps(card))
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return None
@@ -233,6 +259,82 @@ def _with_anthropic_plan(card: dict[str, Any]) -> dict[str, Any]:
     return card
 
 
+_ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+_ANTHROPIC_WINDOWS = (
+    ("five_hour", "Current session"),
+    ("seven_day", "Current week"),
+    ("seven_day_opus", "Opus week"),
+    ("seven_day_sonnet", "Sonnet week"),
+)
+
+
+def _fetch_anthropic_usage_card() -> dict[str, Any]:
+    """Claude OAuth usage with ``utilization`` read as the percent Anthropic returns.
+
+    Hermes core's ``_fetch_anthropic_account_usage`` multiplies any utilization <= 1 by 100
+    (upstream #58226), so a freshly reset session at 1 % shows as 100 % used. Reuse the core's
+    credential resolver and HTTP helper, but parse the windows here. Cores without those helpers
+    fall back to the core fetch unchanged.
+    """
+    try:
+        from agent.account_usage import _get_json, _is_oauth_token, _parse_dt, resolve_anthropic_token
+    except ImportError:
+        from agent.account_usage import _fetch_anthropic_account_usage
+
+        return _snapshot_to_card("anthropic", "Claude Code", _fetch_anthropic_account_usage())
+
+    token = str(resolve_anthropic_token() or "").strip()
+    if not token:
+        return _snapshot_to_card("anthropic", "Claude Code", None)
+    if not _is_oauth_token(token):
+        return _unavailable(
+            "anthropic",
+            "Claude Code",
+            "Anthropic account limits are only available for OAuth-backed Claude accounts.",
+            "oauth_usage_api",
+        )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "anthropic-beta": "oauth-2025-04-20",
+        "User-Agent": "claude-code/2.1.0",
+    }
+    payload = _get_json(_ANTHROPIC_USAGE_URL, headers, timeout=15.0) or {}
+    windows = []
+    for key, label in _ANTHROPIC_WINDOWS:
+        raw = payload.get(key) if isinstance(payload.get(key), dict) else {}
+        used = _number(raw.get("utilization"))
+        if used is None:
+            continue
+        used = max(0.0, min(100.0, used))
+        windows.append(
+            {
+                "label": label,
+                "used_percent": used,
+                "remaining_percent": 100.0 - used,
+                "reset_at": _iso(_parse_dt(raw.get("resets_at"))),
+                "detail": None,
+            }
+        )
+    details = []
+    extra = payload.get("extra_usage") if isinstance(payload.get("extra_usage"), dict) else {}
+    used_credits, monthly_limit = _number(extra.get("used_credits")), _number(extra.get("monthly_limit"))
+    if extra.get("is_enabled") and used_credits is not None and monthly_limit is not None:
+        details.append(f"Extra usage: {used_credits:.2f} / {monthly_limit:.2f} {extra.get('currency') or 'USD'}")
+    return {
+        "provider": "anthropic",
+        "label": "Claude Code",
+        "available": bool(windows),
+        "plan": None,
+        "source": "oauth_usage_api",
+        "fetched_at": _iso(_now()),
+        "windows": windows,
+        "details": details,
+        "reason": None if windows else "The provider did not expose any usage windows.",
+    }
+
+
 def _anthropic_card() -> dict[str, Any]:
     fresh = _read_anthropic_cache(_ANTHROPIC_FRESH_SECONDS)
     if fresh is not None:
@@ -241,11 +343,7 @@ def _anthropic_card() -> dict[str, Any]:
 
     failure_reason = "Claude Code usage could not be queried temporarily."
     try:
-        from agent.account_usage import _fetch_anthropic_account_usage
-
-        card = _with_anthropic_plan(
-            _snapshot_to_card("anthropic", "Claude Code", _fetch_anthropic_account_usage())
-        )
+        card = _with_anthropic_plan(_fetch_anthropic_usage_card())
         if card.get("available"):
             _write_anthropic_cache(card)
             return card
@@ -890,20 +988,27 @@ def get_usage():
         return _get_usage()
 
 
+def _response_cache_is_fresh(now: float) -> bool:
+    cached = _CACHE.get("payload")
+    return (
+        cached is not None
+        and now - float(_CACHE.get("at") or 0.0) < _CACHE_TTL_SECONDS
+        and not _payload_has_rolled_over(cached)
+    )
+
+
 def _get_usage():
     if not _USE_PROCESS_CACHE.get():
         return _collect()
     now = time.monotonic()
     with _CACHE_LOCK:
-        cached = _CACHE.get("payload")
-        if cached is not None and now - float(_CACHE.get("at") or 0.0) < _CACHE_TTL_SECONDS:
-            return cached
+        if _response_cache_is_fresh(now):
+            return _CACHE["payload"]
     with _COLLECT_LOCK:
         now = time.monotonic()
         with _CACHE_LOCK:
-            cached = _CACHE.get("payload")
-            if cached is not None and now - float(_CACHE.get("at") or 0.0) < _CACHE_TTL_SECONDS:
-                return cached
+            if _response_cache_is_fresh(now):
+                return _CACHE["payload"]
         payload = _collect()
         with _CACHE_LOCK:
             _CACHE["at"] = time.monotonic()
