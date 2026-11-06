@@ -1,4 +1,8 @@
-"""Install the desktop UI portion of Hermes Usage Dashboard."""
+"""LEGACY (Hermes < 0.22): copy the desktop UI into ``desktop-plugins/``.
+
+Hermes >= 0.22.5 loads ``desktop/plugin.js`` straight from the installed plugin, so do not run this
+there: a second copy with the same id goes stale after ``hermes plugins update``.
+"""
 from __future__ import annotations
 
 import os
@@ -21,7 +25,7 @@ def hermes_home() -> Path:
 
 
 def install() -> Path:
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     source = root / "desktop" / "plugin.js"
     if not source.is_file():
         raise FileNotFoundError(f"Desktop plugin source not found: {source}")

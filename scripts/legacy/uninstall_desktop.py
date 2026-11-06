@@ -1,4 +1,4 @@
-"""Remove the desktop UI portion of Hermes Usage Dashboard."""
+"""LEGACY (Hermes < 0.22): remove the copy made by ``install_desktop.py``."""
 from __future__ import annotations
 
 import os

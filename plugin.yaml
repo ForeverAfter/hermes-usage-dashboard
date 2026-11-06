@@ -1,5 +1,54 @@
 name: usage-dashboard
-version: 1.3.2
-description: "Local subscription usage dashboard for OpenAI Codex, Claude Code, Kimi/Moonshot, ZCode/Z.ai, and Nous Research."
+version: 1.4.0
+manifest_version: 2
+description: "AI Usage: subscription quota for OpenAI Codex, Claude Code, Kimi, Z.ai and Nous in the Hermes Desktop status bar, plus a usage_availability tool that tells agents which subscription still has quota."
 author: "ForeverAfter"
+license: MIT
+homepage: https://github.com/ForeverAfter/hermes-usage-dashboard
 kind: standalone
+requires_hermes: ">=0.22.5"
+tags: [usage, quota, subscriptions, desktop]
+provides_tools:
+  - usage_availability
+# Keys read through Hermes's secret scope (agent.secret_scope.get_secret) to query Kimi Code and Z.ai.
+# They are the keys Hermes already uses for those providers; none is required.
+optional_env:
+  - name: KIMI_API_KEY
+    description: "Kimi Coding key (shows Kimi quota; sent only to api.kimi.com)"
+    secret: true
+  - name: KIMI_CODING_API_KEY
+    description: "Alternative name for the Kimi Coding key"
+    secret: true
+  - name: GLM_API_KEY
+    description: "Z.ai key (shows Z.ai quota; sent only to api.z.ai)"
+    secret: true
+  - name: ZAI_API_KEY
+    description: "Alternative name for the Z.ai key"
+    secret: true
+  - name: Z_AI_API_KEY
+    description: "Alternative name for the Z.ai key"
+    secret: true
+config_schema:
+  low_threshold_percent:
+    type: int
+    default: 15
+    label: "Low-quota threshold (%)"
+    description: "A provider with this much quota left or less is published as 'low' in availability.json."
+  alerts_enabled:
+    type: bool
+    default: true
+    label: "Threshold alerts"
+    description: "Notify when a quota window crosses the warning and critical thresholds."
+  alert_warn_percent:
+    type: int
+    default: 80
+    label: "Warning alert at (% used)"
+  alert_critical_percent:
+    type: int
+    default: 95
+    label: "Critical alert at (% used)"
+  kimi_desktop_log_fallback:
+    type: bool
+    default: false
+    label: "Read the Kimi Desktop log when the Kimi API is unavailable"
+    description: "Off by default. When on, the plugin reads up to 2 MB of Kimi Desktop's own local log file."

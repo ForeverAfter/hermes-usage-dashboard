@@ -1,17 +1,18 @@
 """Backend for the Hermes Desktop subscription-usage dashboard.
 
-Only sanitized usage data leaves this module. OAuth/API credentials remain in
-Hermes's provider resolvers and are never included in responses or logs.
+Only sanitized usage data leaves this module. Credentials stay inside Hermes's
+secret scope (or, for Codex, inside Hermes's own usage fetcher) and are never
+included in responses, caches, ``availability.json`` or logs.
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,35 +22,40 @@ import httpx
 from fastapi import APIRouter
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
-
-def _hermes_root() -> Path:
-    configured = os.environ.get("HERMES_HOME")
-    if configured:
-        home = Path(configured).expanduser()
-        if home.parent.name == "profiles":
-            return home.parent.parent
-        return home
-    if os.name == "nt":
-        return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "hermes"
-    return Path.home() / ".hermes"
-
-
-def _kimi_log_file() -> Path:
-    if os.name == "nt":
-        roaming = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-        return roaming / "kimi-desktop" / "logs" / "main.log"
-    return Path.home() / ".config" / "kimi-desktop" / "logs" / "main.log"
+PLUGIN_NAME = "usage-dashboard"
+VERSION = "1.4.0"
 
 _CACHE_LOCK = threading.Lock()
 _CACHE_TTL_SECONDS = 120.0
 _CACHE: dict[str, Any] = {"at": 0.0, "payload": None}
 _COLLECT_LOCK = threading.Lock()
-_ANTHROPIC_CACHE_FILE = _hermes_root() / "cache" / "usage-dashboard" / "anthropic.json"
 _ANTHROPIC_FRESH_SECONDS = 300.0
 _ANTHROPIC_STALE_SECONDS = 86_400.0
 _USE_PROCESS_CACHE: ContextVar[bool] = ContextVar("usage_process_cache", default=True)
-_ANTHROPIC_CACHE_PATH: ContextVar[Optional[Path]] = ContextVar("usage_anthropic_cache_path", default=None)
+
+# Provider cards in display order: (card id, label, Hermes provider id used in availability.json).
+_PROVIDERS = (
+    ("openai-codex", "OpenAI Codex", "openai-codex"),
+    ("anthropic", "Claude Code", "anthropic"),
+    ("kimi", "Kimi / Moonshot", "kimi-coding"),
+    ("zai", "ZCode / Z.ai", "zai"),
+    ("nous", "Nous Research", "nous"),
+)
+
+# Keys under plugins.entries.usage-dashboard.settings (declared in plugin.yaml `config_schema`).
+_DEFAULT_SETTINGS: dict[str, Any] = {
+    "low_threshold_percent": 15,
+    "alerts_enabled": True,
+    "alert_warn_percent": 80,
+    "alert_critical_percent": 95,
+    "kimi_desktop_log_fallback": False,
+}
+
+# Secrets are read with agent.secret_scope.get_secret (declared as optional_env in plugin.yaml).
+_KIMI_KEY_ENV = ("KIMI_API_KEY", "KIMI_CODING_API_KEY")
+_ZAI_KEY_ENV = ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY")
 
 
 def _now() -> datetime:
@@ -60,44 +66,62 @@ def _iso(value: Optional[datetime]) -> Optional[str]:
     return value.astimezone(timezone.utc).isoformat() if value else None
 
 
+def _parse_dt(value: Any) -> Optional[datetime]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _data_dir() -> Path:
+    """Per-plugin data root (survives update/remove and follows the active profile)."""
+    from plugins.plugin_storage import plugin_data_dir
+
+    return plugin_data_dir(PLUGIN_NAME)
+
+
+def _plugin_settings() -> dict[str, Any]:
+    """Validated plugin settings; a missing or ill-typed key falls back to its default."""
+    settings = dict(_DEFAULT_SETTINGS)
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        entries = ((load_config_readonly() or {}).get("plugins") or {}).get("entries") or {}
+        configured = (entries.get(PLUGIN_NAME) or {}).get("settings") or {}
+    except Exception:
+        configured = {}
+    if not isinstance(configured, dict):
+        return settings
+    for key, default in _DEFAULT_SETTINGS.items():
+        value = configured.get(key, default)
+        if isinstance(default, bool):
+            settings[key] = value if isinstance(value, bool) else default
+        elif isinstance(value, (int, float)) and not isinstance(value, bool) and 1 <= value <= 100:
+            settings[key] = int(value)
+    if settings["alert_critical_percent"] <= settings["alert_warn_percent"]:
+        settings["alert_warn_percent"] = _DEFAULT_SETTINGS["alert_warn_percent"]
+        settings["alert_critical_percent"] = _DEFAULT_SETTINGS["alert_critical_percent"]
+    return settings
+
+
 def _window_order(window: dict[str, Any]) -> int:
+    """0 = session / 5 hours, 1 = week, 2 = month or subscription period, 3 = anything else."""
     label = str(window.get("label") or "").casefold()
-    if (
-        "5-hour" in label
-        or "five hour" in label
-        or "5 horas" in label
-        or label in {"session", "current session", "sesión", "sesión actual"}
-    ):
+    if "5-hour" in label or "five hour" in label or label in {"session", "current session"}:
         return 0
-    if "week" in label or "semana" in label:
+    if "week" in label:
         return 1
-    if (
-        "month" in label
-        or "mensual" in label
-        or "subscription period" in label
-        or "periodo de suscripción" in label
-    ):
+    if "month" in label or "subscription period" in label:
         return 2
     return 3
-
-
-def _anthropic_plan_from_claude_config(path: Optional[Path] = None) -> Optional[str]:
-    try:
-        data = json.loads((path or Path.home() / ".claude.json").read_text(encoding="utf-8"))
-        account = data.get("oauthAccount") if isinstance(data, dict) else None
-        organization_type = (
-            str(account.get("organizationType") or "").casefold()
-            if isinstance(account, dict)
-            else ""
-        )
-        return {
-            "claude_max": "Max",
-            "claude_pro": "Pro",
-            "claude_team": "Team",
-            "claude_enterprise": "Enterprise",
-        }.get(organization_type)
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return None
 
 
 def _unavailable(provider: str, label: str, reason: str, source: str = "local") -> dict[str, Any]:
@@ -114,6 +138,13 @@ def _unavailable(provider: str, label: str, reason: str, source: str = "local") 
     }
 
 
+def _missing_scope_card(provider: str, label: str, source: str = "local") -> dict[str, Any]:
+    """Internal scope failure: fixed text, never the exception, never a stale card."""
+    card = _unavailable(provider, label, f"{label} usage requires an active Hermes profile scope.", source)
+    card["failure_category"] = "missing_profile_scope"
+    return card
+
+
 def _public_window(window: dict[str, Any]) -> dict[str, Any]:
     return {
         "label": str(window.get("label") or ""),
@@ -125,6 +156,8 @@ def _public_window(window: dict[str, Any]) -> dict[str, Any]:
         ),
         "reset_at": window.get("reset_at") if isinstance(window.get("reset_at"), str) else None,
         "detail": window.get("detail") if isinstance(window.get("detail"), str) else None,
+        # "model": caps one model family (Opus / Sonnet weekly); it never means the account is out.
+        "scope": "model" if window.get("scope") == "model" else "account",
     }
 
 
@@ -170,6 +203,7 @@ def _snapshot_to_card(provider: str, label: str, snapshot: Any) -> dict[str, Any
                 "remaining_percent": None if used is None else max(0.0, 100.0 - used),
                 "reset_at": _iso(window.reset_at),
                 "detail": window.detail,
+                "scope": getattr(window, "scope", "account"),
             }
         )
     return {
@@ -185,27 +219,13 @@ def _snapshot_to_card(provider: str, label: str, snapshot: Any) -> dict[str, Any
     }
 
 
-def _snapshot_card(provider: str, label: str) -> dict[str, Any]:
-    from agent.account_usage import fetch_account_usage
-
-    return _snapshot_to_card(provider, label, fetch_account_usage(provider))
-
-
 def _window_has_rolled_over(card: dict[str, Any], now: Optional[datetime] = None) -> bool:
     """True when any cached window's reset time has passed: its percentages describe a
     window that no longer exists, so the cache must not hide the new one."""
     now = now or _now()
     for window in card.get("windows") or []:
-        reset = window.get("reset_at") if isinstance(window, dict) else None
-        if not isinstance(reset, str):
-            continue
-        try:
-            moment = datetime.fromisoformat(reset.replace("Z", "+00:00"))
-        except ValueError:
-            continue
-        if moment.tzinfo is None:
-            moment = moment.replace(tzinfo=timezone.utc)
-        if moment <= now:
+        moment = _parse_dt(window.get("reset_at") if isinstance(window, dict) else None)
+        if moment is not None and moment <= now:
             return True
     return False
 
@@ -215,12 +235,78 @@ def _payload_has_rolled_over(payload: Any) -> bool:
     return any(isinstance(card, dict) and _window_has_rolled_over(card) for card in providers or [])
 
 
+def _number(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _epoch_ms_iso(value: Any) -> Optional[str]:
+    if not isinstance(value, (int, float)) or value <= 0:
+        return None
+    try:
+        seconds = float(value) / 1000.0 if value > 10_000_000_000 else float(value)
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _normalized_reset(value: Any) -> Optional[str]:
+    if isinstance(value, (int, float)):
+        return _epoch_ms_iso(value)
+    return _iso(_parse_dt(value))
+
+
+def _is_unscoped_error(exc: BaseException) -> bool:
+    try:
+        from agent.secret_scope import UnscopedSecretError
+    except ImportError:
+        return False
+    return isinstance(exc, UnscopedSecretError)
+
+
+def _first_secret(names: tuple[str, ...]) -> str:
+    """First non-blank value among ``names`` from the active profile's secret scope."""
+    from agent.secret_scope import get_secret
+
+    for name in names:
+        value = str(get_secret(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+# --- Anthropic (Claude Code) ------------------------------------------------------------------
+# Hermes core still reads this endpoint's ``utilization`` with ``fraction=True``: any value <= 1 is
+# multiplied by 100, so a freshly reset session at 1 % renders as 100 % (upstream #58226). The public
+# ``fetch_account_usage("anthropic")`` therefore cannot be used yet, because the original value is
+# lost. Remove this block once core reads the value as the percent it is.
+
+_ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+_ANTHROPIC_WINDOWS = (
+    ("five_hour", "Current session", "account"),
+    ("seven_day", "Current week", "account"),
+    ("seven_day_opus", "Opus week", "model"),
+    ("seven_day_sonnet", "Sonnet week", "model"),
+)
+_ANTHROPIC_API_KEY_PREFIXES = ("sk-ant-api", "sk-ant-usr", "sk-ant-svc", "sk-ant-admin")
+
+
+def _is_oauth_token(token: str) -> bool:
+    """Console API keys cannot read OAuth usage; every other Anthropic token shape can."""
+    return not token.startswith(_ANTHROPIC_API_KEY_PREFIXES) and token.startswith(("sk-ant-", "eyJ", "cc-"))
+
+
+def _anthropic_cache_path() -> Path:
+    return _data_dir() / "anthropic-cache.json"
+
+
 def _read_anthropic_cache(max_age: float) -> Optional[dict[str, Any]]:
     if not _USE_PROCESS_CACHE.get():
         return None
     try:
-        path = _ANTHROPIC_CACHE_PATH.get() or _ANTHROPIC_CACHE_FILE
-        entry = json.loads(path.read_text(encoding="utf-8"))
+        entry = json.loads(_anthropic_cache_path().read_text(encoding="utf-8"))
         saved_at = float(entry.get("saved_at") or 0.0)
         card = entry.get("card")
         if time.time() - saved_at > max_age or not isinstance(card, dict):
@@ -238,11 +324,10 @@ def _write_anthropic_cache(card: dict[str, Any]) -> None:
     if not _USE_PROCESS_CACHE.get() or not card.get("available") or not card.get("windows"):
         return
     try:
-        path = _ANTHROPIC_CACHE_PATH.get() or _ANTHROPIC_CACHE_FILE
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path = _anthropic_cache_path()
         temporary = path.with_suffix(".tmp")
         temporary.write_text(
-            json.dumps({"saved_at": time.time(), "card": card}, ensure_ascii=False),
+            json.dumps({"saved_at": time.time(), "card": _public_card(card)}, ensure_ascii=False),
             encoding="utf-8",
         )
         temporary.replace(path)
@@ -250,38 +335,9 @@ def _write_anthropic_cache(card: dict[str, Any]) -> None:
         pass
 
 
-def _with_anthropic_plan(card: dict[str, Any]) -> dict[str, Any]:
-    if not _USE_PROCESS_CACHE.get():
-        return card  # The launch user's Claude metadata is not a routed account's plan.
-    plan = _anthropic_plan_from_claude_config()
-    if plan:
-        card["plan"] = plan
-    return card
-
-
-_ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-_ANTHROPIC_WINDOWS = (
-    ("five_hour", "Current session"),
-    ("seven_day", "Current week"),
-    ("seven_day_opus", "Opus week"),
-    ("seven_day_sonnet", "Sonnet week"),
-)
-
-
 def _fetch_anthropic_usage_card() -> dict[str, Any]:
-    """Claude OAuth usage with ``utilization`` read as the percent Anthropic returns.
-
-    Hermes core's ``_fetch_anthropic_account_usage`` multiplies any utilization <= 1 by 100
-    (upstream #58226), so a freshly reset session at 1 % shows as 100 % used. Reuse the core's
-    credential resolver and HTTP helper, but parse the windows here. Cores without those helpers
-    fall back to the core fetch unchanged.
-    """
-    try:
-        from agent.account_usage import _get_json, _is_oauth_token, _parse_dt, resolve_anthropic_token
-    except ImportError:
-        from agent.account_usage import _fetch_anthropic_account_usage
-
-        return _snapshot_to_card("anthropic", "Claude Code", _fetch_anthropic_account_usage())
+    """Claude OAuth usage with ``utilization`` read as the percent Anthropic returns."""
+    from agent.account_usage import resolve_anthropic_token
 
     token = str(resolve_anthropic_token() or "").strip()
     if not token:
@@ -296,13 +352,15 @@ def _fetch_anthropic_usage_card() -> dict[str, Any]:
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
-        "Content-Type": "application/json",
         "anthropic-beta": "oauth-2025-04-20",
-        "User-Agent": "claude-code/2.1.0",
+        "User-Agent": f"hermes-usage-dashboard/{VERSION}",
     }
-    payload = _get_json(_ANTHROPIC_USAGE_URL, headers, timeout=15.0) or {}
+    with httpx.Client(timeout=15.0) as client:
+        response = client.get(_ANTHROPIC_USAGE_URL, headers=headers)
+        response.raise_for_status()
+    payload = response.json() or {}
     windows = []
-    for key, label in _ANTHROPIC_WINDOWS:
+    for key, label, scope in _ANTHROPIC_WINDOWS:
         raw = payload.get(key) if isinstance(payload.get(key), dict) else {}
         used = _number(raw.get("utilization"))
         if used is None:
@@ -315,6 +373,7 @@ def _fetch_anthropic_usage_card() -> dict[str, Any]:
                 "remaining_percent": 100.0 - used,
                 "reset_at": _iso(_parse_dt(raw.get("resets_at"))),
                 "detail": None,
+                "scope": scope,
             }
         )
     details = []
@@ -339,11 +398,11 @@ def _anthropic_card() -> dict[str, Any]:
     fresh = _read_anthropic_cache(_ANTHROPIC_FRESH_SECONDS)
     if fresh is not None:
         fresh["source"] = "oauth_usage_api-cache"
-        return _with_anthropic_plan(fresh)
+        return fresh
 
     failure_reason = "Claude Code usage could not be queried temporarily."
     try:
-        card = _with_anthropic_plan(_fetch_anthropic_usage_card())
+        card = _fetch_anthropic_usage_card()
         if card.get("available"):
             _write_anthropic_cache(card)
             return card
@@ -356,31 +415,19 @@ def _anthropic_card() -> dict[str, Any]:
             else f"Anthropic temporarily rejected the usage request (HTTP {status})."
         )
     except Exception as exc:
-        try:
-            from agent.secret_scope import UnscopedSecretError
-        except ImportError:
-            pass  # Older Hermes has no scoped-secret error type.
-        else:
-            if isinstance(exc, UnscopedSecretError):
-                # This is an internal scope failure, not logout or rate limiting.
-                # Do not hide it behind a stale account card or expose exc text.
-                card = _unavailable(
-                    "anthropic", "Claude Code",
-                    "Claude Code usage requires an active Hermes profile scope.",
-                    "oauth_usage_api",
-                )
-                card["failure_category"] = "missing_profile_scope"
-                return card
+        if _is_unscoped_error(exc):
+            return _missing_scope_card("anthropic", "Claude Code", "oauth_usage_api")
 
     stale = _read_anthropic_cache(_ANTHROPIC_STALE_SECONDS)
     if stale is not None:
         stale["source"] = "oauth_usage_api-cache"
         stale["stale"] = True
         stale["details"] = list(stale.get("details") or []) + [failure_reason]
-        return _with_anthropic_plan(stale)
-    return _with_anthropic_plan(
-        _unavailable("anthropic", "Claude Code", failure_reason, "oauth_usage_api")
-    )
+        return stale
+    return _unavailable("anthropic", "Claude Code", failure_reason, "oauth_usage_api")
+
+
+# --- Nous Research ----------------------------------------------------------------------------
 
 
 def _renewal_from_details(details: list[str]) -> Optional[str]:
@@ -393,13 +440,16 @@ def _renewal_from_details(details: list[str]) -> Optional[str]:
 
 
 def _nous_card() -> dict[str, Any]:
-    """Fetch the signed-in Nous Portal account and expose only credit totals."""
+    """Fetch the signed-in Nous Portal account and expose only credit totals.
+
+    Hermes has no public usage fetcher for Nous (``usage.bars`` is a dollar view and is only reachable
+    from the Desktop frontend), so this is the one remaining private core import.
+    """
     try:
         from agent.account_usage import build_nous_credits_snapshot
         from hermes_cli.nous_account import get_nous_portal_account_info
 
-        # Hermes performs the account HTTP fetch with an internal 8-second
-        # timeout; snapshot construction is local and does no network I/O.
+        # The response cache above this call keeps it to one portal round-trip per two minutes.
         account = get_nous_portal_account_info(force_fresh=True)
         snapshot = build_nous_credits_snapshot(account)
         if snapshot is None:
@@ -420,6 +470,7 @@ def _nous_card() -> dict[str, Any]:
                     "remaining_percent": None if used is None else max(0.0, 100.0 - used),
                     "reset_at": _iso(window.reset_at),
                     "detail": window.detail,
+                    "scope": getattr(window, "scope", "account"),
                 }
             )
 
@@ -458,81 +509,31 @@ def _nous_card() -> dict[str, Any]:
         )
 
 
-def _codex_card() -> dict[str, Any]:
-    """Read the same local OAuth-backed usage endpoint Hermes uses.
+# --- OpenAI Codex -----------------------------------------------------------------------------
 
-    Hermes's generic snapshot currently labels ``primary_window`` as a
-    session. Codex can place a weekly bucket there, so classify by the actual
-    duration instead of by field position.
+
+def _codex_card() -> dict[str, Any]:
+    """Codex through Hermes's own public usage fetcher; the plugin never holds the sign-in.
+
+    Core labels the windows by their published duration (Session / Weekly) and attaches the account
+    headers itself. ``read_only=True`` never refreshes or rotates a credential.
     """
     try:
-        try:
-            from agent.account_usage import _codex_backend_urls, _resolve_codex_usage_credentials
-        except (ImportError, AttributeError):
-            return _snapshot_card("openai-codex", "OpenAI Codex")
+        from agent.account_usage import fetch_account_usage
 
-        token, base_url, account_id = _resolve_codex_usage_credentials(None, None)
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-            "User-Agent": "codex-cli",
-        }
-        if account_id:
-            headers["ChatGPT-Account-Id"] = account_id
-        with httpx.Client(timeout=15.0) as client:
-            response = client.get(_codex_backend_urls(base_url)[0], headers=headers)
-            response.raise_for_status()
-        payload = response.json() or {}
-        rate_limit = payload.get("rate_limit") or {}
-        windows = []
-        for key in ("primary_window", "secondary_window"):
-            window = rate_limit.get(key) or {}
-            used = window.get("used_percent")
-            if not isinstance(used, (int, float)):
-                continue
-            duration_seconds = window.get("limit_window_seconds")
-            if duration_seconds == 18_000:
-                label = "5-hour window"
-            elif duration_seconds == 604_800:
-                label = "Weekly window"
-            elif isinstance(duration_seconds, (int, float)) and 2_419_200 <= duration_seconds <= 2_678_400:
-                label = "Monthly period"
-            else:
-                label = "Codex limit"
-            used_percent = max(0.0, min(100.0, float(used)))
-            windows.append(
-                {
-                    "label": label,
-                    "used_percent": used_percent,
-                    "remaining_percent": 100.0 - used_percent,
-                    "reset_at": _epoch_ms_iso(window.get("reset_at")),
-                    "detail": None,
-                }
-            )
-        return {
-            "provider": "openai-codex",
-            "label": "OpenAI Codex",
-            "available": bool(windows),
-            "plan": str(payload.get("plan_type") or "").title() or None,
-            "source": "codex-usage-api",
-            "fetched_at": _iso(_now()),
-            "windows": windows,
-            "details": [],
-            "reason": None if windows else "Codex did not return any usage windows.",
-        }
-    except TypeError:
-        return _snapshot_card("openai-codex", "OpenAI Codex")
+        return _snapshot_to_card(
+            "openai-codex", "OpenAI Codex", fetch_account_usage("openai-codex", read_only=True)
+        )
     except Exception:
-        fallback = _snapshot_card("openai-codex", "OpenAI Codex")
-        if fallback.get("available"):
-            return fallback
         return _unavailable(
             "openai-codex",
             "OpenAI Codex",
-            "The local Codex OAuth session could not be queried.",
-            "codex-usage-api",
+            "The Codex sign-in could not be queried through Hermes.",
+            "hermes-account-usage",
         )
 
+
+# --- Kimi / Moonshot --------------------------------------------------------------------------
 
 _KIMI_SUB_RE = re.compile(
     r"^\[(?P<at>[^]]+)\].*refreshed\(sub\): level=(?P<level>\d+) "
@@ -544,6 +545,13 @@ _KIMI_PLAN_RE = re.compile(r"commercialInfo sending .*membershipLevel=(?P<plan>\
 _KIMI_STATS_RE = re.compile(r"refreshed\(stats\): overdrawn=(?P<overdrawn>\w+) sendBlocked=(?P<blocked>\w+)")
 
 
+def _kimi_log_file() -> Path:
+    if os.name == "nt":
+        roaming = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+        return roaming / "kimi-desktop" / "logs" / "main.log"
+    return Path.home() / ".config" / "kimi-desktop" / "logs" / "main.log"
+
+
 def _local_log_time(value: str) -> Optional[str]:
     try:
         return datetime.fromisoformat(value.strip()).astimezone(timezone.utc).isoformat()
@@ -552,17 +560,21 @@ def _local_log_time(value: str) -> Optional[str]:
 
 
 def _kimi_log_card(fallback_reason: Optional[str] = None) -> dict[str, Any]:
+    """Kimi Desktop's own log, read only when the user turned the opt-in setting on."""
+    if not _plugin_settings()["kimi_desktop_log_fallback"]:
+        reason = fallback_reason or "Kimi usage needs a Kimi Coding key in Hermes."
+        return _unavailable(
+            "kimi",
+            "Kimi / Moonshot",
+            f"{reason} Reading the Kimi Desktop log is off; enable it in this plugin's settings.",
+            "kimi-coding-usage-api",
+        )
     log_path = _kimi_log_file()
     if not log_path.is_file():
         reason = "Kimi Desktop is not installed or has not generated subscription data yet."
         if fallback_reason:
             reason = f"{fallback_reason} {reason}"
-        return _unavailable(
-            "kimi",
-            "Kimi / Moonshot",
-            reason,
-            "kimi-desktop-log",
-        )
+        return _unavailable("kimi", "Kimi / Moonshot", reason, "kimi-desktop-log")
     try:
         last_sub = None
         last_plan = None
@@ -590,12 +602,7 @@ def _kimi_log_card(fallback_reason: Optional[str] = None) -> dict[str, Any]:
             reason = "Open Kimi Desktop and sign in to refresh usage data."
             if fallback_reason:
                 reason = f"{fallback_reason} {reason}"
-            return _unavailable(
-                "kimi",
-                "Kimi / Moonshot",
-                reason,
-                "kimi-desktop-log",
-            )
+            return _unavailable("kimi", "Kimi / Moonshot", reason, "kimi-desktop-log")
         ratio = max(0.0, min(1.0, float(last_sub.group("ratio"))))
         details = [f"Membership level: {last_sub.group('level')}"]
         if last_stats is not None and last_stats.group("blocked").lower() == "true":
@@ -627,6 +634,7 @@ def _kimi_log_card(fallback_reason: Optional[str] = None) -> dict[str, Any]:
                     "remaining_percent": (1.0 - ratio) * 100.0,
                     "reset_at": _normalized_reset(last_sub.group("reset")),
                     "detail": "Local Kimi Desktop data; it refreshes when Kimi is opened.",
+                    "scope": "account",
                 }
             ],
             "details": details,
@@ -641,33 +649,12 @@ def _kimi_log_card(fallback_reason: Optional[str] = None) -> dict[str, Any]:
         )
 
 
-def _number(value: Any) -> Optional[float]:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _normalized_reset(value: Any) -> Optional[str]:
-    if isinstance(value, (int, float)):
-        return _epoch_ms_iso(value)
-    if isinstance(value, str) and value.strip():
-        try:
-            return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
-        except ValueError:
-            return None
-    return None
-
-
 def _kimi_card() -> dict[str, Any]:
-    """Read Kimi Code's own usage endpoint, with Desktop log fallback."""
+    """Kimi Code's own usage endpoint, with an opt-in Kimi Desktop log fallback."""
     try:
-        from hermes_cli.runtime_provider import resolve_runtime_provider
-
-        runtime = resolve_runtime_provider(requested="kimi-coding")
-        token = str(runtime.get("api_key") or "").strip()
+        token = _first_secret(_KIMI_KEY_ENV)
         if not token:
-            return _kimi_log_card("No Kimi Coding key is available; showing local data instead.")
+            return _kimi_log_card("No Kimi Coding key (KIMI_API_KEY) is available in Hermes.")
         with httpx.Client(timeout=10.0) as client:
             response = client.get(
                 "https://api.kimi.com/coding/v1/usages",
@@ -698,6 +685,7 @@ def _kimi_card() -> dict[str, Any]:
                         or weekly.get("resetTime")
                     ),
                     "detail": f"{weekly_used:g} used out of {weekly_limit:g}",
+                    "scope": "account",
                 }
             )
 
@@ -732,11 +720,12 @@ def _kimi_card() -> dict[str, Any]:
                         or detail.get("resetTime")
                     ),
                     "detail": f"{used_value:g} used out of {limit_value:g}",
+                    "scope": "account",
                 }
             )
 
         if not windows:
-            return _kimi_log_card()
+            return _kimi_log_card("The Kimi API returned no usage limits.")
         membership = ((payload.get("user") or {}).get("membership") or {}).get("level")
         plan = str(membership or "").replace("LEVEL_", "").replace("_", " ").title() or None
         return {
@@ -752,29 +741,19 @@ def _kimi_card() -> dict[str, Any]:
             "reason": None,
         }
     except httpx.HTTPStatusError as exc:
-        return _kimi_log_card(
-            f"The Kimi API rejected the request (HTTP {exc.response.status_code}); showing local data instead."
-        )
-    except Exception:
-        return _kimi_log_card("The Kimi API did not respond; showing local data instead.")
+        return _kimi_log_card(f"The Kimi API rejected the request (HTTP {exc.response.status_code}).")
+    except Exception as exc:
+        if _is_unscoped_error(exc):
+            return _missing_scope_card("kimi", "Kimi / Moonshot", "kimi-coding-usage-api")
+        return _kimi_log_card("The Kimi API did not respond.")
 
 
-def _epoch_ms_iso(value: Any) -> Optional[str]:
-    if not isinstance(value, (int, float)) or value <= 0:
-        return None
-    try:
-        seconds = float(value) / 1000.0 if value > 10_000_000_000 else float(value)
-        return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
-    except (OverflowError, OSError, ValueError):
-        return None
+# --- Z.ai -------------------------------------------------------------------------------------
 
 
 def _zai_card() -> dict[str, Any]:
     try:
-        from hermes_cli.runtime_provider import resolve_runtime_provider
-
-        runtime = resolve_runtime_provider(requested="zai")
-        token = str(runtime.get("api_key") or "").strip()
+        token = _first_secret(_ZAI_KEY_ENV)
         if not token:
             return _unavailable(
                 "zai",
@@ -797,7 +776,7 @@ def _zai_card() -> dict[str, Any]:
         data = quota_payload.get("data") or {}
         limits = data.get("limits") or []
         windows = []
-        for index, limit in enumerate(limits):
+        for limit in limits:
             if not isinstance(limit, dict):
                 continue
             used = limit.get("percentage")
@@ -844,6 +823,7 @@ def _zai_card() -> dict[str, Any]:
                     "remaining_percent": None if used is None else max(0.0, 100.0 - used),
                     "reset_at": _epoch_ms_iso(limit.get("nextResetTime")),
                     "detail": " ".join(detail_parts) or None,
+                    "scope": "account",
                 }
             )
 
@@ -879,13 +859,111 @@ def _zai_card() -> dict[str, Any]:
             f"Z.ai rejected the request (HTTP {exc.response.status_code}).",
             "zai-quota-api",
         )
-    except Exception:
+    except Exception as exc:
+        if _is_unscoped_error(exc):
+            return _missing_scope_card("zai", "ZCode / Z.ai", "zai-quota-api")
         return _unavailable(
             "zai",
             "ZCode / Z.ai",
             "Z.ai usage could not be queried.",
             "zai-quota-api",
         )
+
+
+# --- Contract 1: availability.json ------------------------------------------------------------
+# Published for the other Agent OS plugins (routes, aiFactory) and the `usage_availability` tool.
+# Facts only: no tokens, accounts or e-mail addresses. Read-only for consumers.
+
+AVAILABILITY_FILE = "availability.json"
+AVAILABILITY_STALE_SECONDS = 900.0
+_AVAILABILITY_WINDOW_NAMES = {0: "session", 1: "week", 2: "month", 3: "other"}
+_EXHAUSTED_AT_OR_BELOW = 1.0
+
+
+def _utc_z(moment: Optional[datetime]) -> Optional[str]:
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if moment else None
+
+
+def _unknown_entry(stale: bool = True) -> dict[str, Any]:
+    return {"state": "unknown", "remaining_percent": None, "window": None, "reset_at": None, "stale": stale}
+
+
+def _availability_entry(card: Any, settings: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """One provider's state. Model-scoped windows never decide it; the session (5 h) and weekly
+    windows decide it when present, otherwise whatever account-wide windows the provider has."""
+    if not isinstance(card, dict) or not card.get("available"):
+        return _unknown_entry()
+    fetched = _parse_dt(card.get("fetched_at"))
+    if (
+        card.get("stale")
+        or fetched is None
+        or (now - fetched).total_seconds() > AVAILABILITY_STALE_SECONDS
+    ):
+        return _unknown_entry()
+    candidates: list[tuple[dict[str, Any], float]] = []
+    for window in card.get("windows") or []:
+        if not isinstance(window, dict) or window.get("scope") == "model":
+            continue
+        remaining = window.get("remaining_percent")
+        if isinstance(remaining, (int, float)) and not isinstance(remaining, bool):
+            candidates.append((window, float(remaining)))
+    if not candidates:
+        return _unknown_entry(stale=False)
+    primary = [item for item in candidates if _window_order(item[0]) <= 1] or candidates
+    exhausted = [item for item in primary if item[1] <= _EXHAUSTED_AT_OR_BELOW]
+    if exhausted:
+        # Access returns only when the LAST exhausted window resets; an unknown reset outranks a known one.
+        def blocks_longest(item: tuple[dict[str, Any], float]) -> tuple[bool, float, int]:
+            reset = _parse_dt(item[0].get("reset_at"))
+            return (reset is None, reset.timestamp() if reset else 0.0, -_window_order(item[0]))
+
+        chosen = max(exhausted, key=blocks_longest)
+        state = "exhausted"
+    else:
+        chosen = min(primary, key=lambda item: (item[1], _window_order(item[0])))
+        state = "low" if chosen[1] <= settings["low_threshold_percent"] else "ok"
+    window, remaining = chosen
+    return {
+        "state": state,
+        "remaining_percent": max(0, min(100, int(round(remaining)))),
+        "window": _AVAILABILITY_WINDOW_NAMES[_window_order(window)],
+        "reset_at": _utc_z(_parse_dt(window.get("reset_at"))),
+        "stale": False,
+    }
+
+
+def _availability_document(cards: list[dict[str, Any]], settings: dict[str, Any], now: datetime) -> dict[str, Any]:
+    by_id = {card.get("provider"): card for card in cards if isinstance(card, dict)}
+    return {
+        "schema": 1,
+        "generated_at": _utc_z(now),
+        "providers": {
+            provider_id: _availability_entry(by_id.get(card_id), settings, now)
+            for card_id, _label, provider_id in _PROVIDERS
+        },
+    }
+
+
+def _write_availability(document: dict[str, Any]) -> None:
+    """Atomic write next to the plugin's other data; a failure never breaks the dashboard."""
+    try:
+        path = _data_dir() / AVAILABILITY_FILE
+        temporary = path.with_name(f"availability.{os.getpid()}.{threading.get_ident()}.tmp")
+        temporary.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(path)
+    except Exception:
+        logger.debug("could not write %s", AVAILABILITY_FILE, exc_info=True)
+
+
+# --- Collection and route ---------------------------------------------------------------------
+
+
+def _public_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "alerts_enabled": bool(settings["alerts_enabled"]),
+        "alert_warn_percent": settings["alert_warn_percent"],
+        "alert_critical_percent": settings["alert_critical_percent"],
+    }
 
 
 def _collect() -> dict[str, Any]:
@@ -906,7 +984,7 @@ def _collect() -> dict[str, Any]:
             except Exception:
                 cards[key] = _unavailable(key, key, "Unexpected error while querying this provider.")
 
-    ordered = [_public_card(cards[key]) for key in ("openai-codex", "anthropic", "kimi", "zai", "nous")]
+    ordered = [_public_card(cards[card_id]) for card_id, _label, _provider in _PROVIDERS]
     for card in ordered:
         windows = card.get("windows")
         if isinstance(windows, list):
@@ -916,76 +994,65 @@ def _collect() -> dict[str, Any]:
         for card in ordered
         if card.get("available")
         for window in card.get("windows", [])
-        if isinstance(window.get("remaining_percent"), (int, float))
+        if window.get("scope") != "model" and isinstance(window.get("remaining_percent"), (int, float))
     ]
+    settings = _plugin_settings()
+    now = _now()
+    _write_availability(_availability_document(ordered, settings, now))
     return {
-        "fetched_at": _iso(_now()),
+        "fetched_at": _iso(now),
         "providers": ordered,
         "summary": {
             "available": sum(1 for card in ordered if card.get("available")),
             "total": len(ordered),
             "lowest_remaining_percent": min(remaining_values) if remaining_values else None,
         },
+        "settings": _public_settings(settings),
         "privacy": "Credentials are used only by the local backend and are never sent to the interface.",
     }
 
 
-@contextmanager
-def _usage_scope():
-    """Bind only the process launch scope; never replace a caller's scope/home.
+def _missing_scope_payload() -> dict[str, Any]:
+    cards = [_public_card(_missing_scope_card(card_id, label)) for card_id, label, _provider in _PROVIDERS]
+    return {
+        "fetched_at": _iso(_now()),
+        "providers": cards,
+        "summary": {"available": 0, "total": len(cards), "lowest_remaining_percent": None},
+        "settings": _public_settings(_plugin_settings()),
+        "privacy": "Credentials are used only by the local backend and are never sent to the interface.",
+    }
 
-    Old cores without the scope API retain their original resolver behavior.
-    An incomplete modern API must fail closed, not fall back to ambient secrets.
+
+def _scope_mode() -> str:
+    """How the current request is bound by Hermes (>= 0.22 binds a secret scope on plugin routes).
+
+    ``launch``: the launch profile's own scope, so process-level caches are safe.
+    ``routed``: another profile's scope, so no cache from the launch profile may be reused.
+    ``missing``: no scope. The plugin never binds one itself; it reports ``missing_profile_scope``.
     """
     try:
-        from agent.secret_scope import current_secret_scope, reset_secret_scope, set_secret_scope
-    except ModuleNotFoundError as exc:
-        if exc.name not in {"agent", "agent.secret_scope"}:
-            raise
-        yield
-        return
-    from hermes_constants import get_hermes_home, get_process_hermes_home
-
-    home = get_process_hermes_home()
-    launch_cache = home / "cache" / "usage-dashboard" / "anthropic.json"
-    if current_secret_scope() is not None:
-        if get_hermes_home().resolve() == home.resolve():
-            # Hermes >= 0.22 binds the launch profile's own scope on every plugin
-            # route. Same home + core-bound scope = launch identity: keep the
-            # deduplicating caches (polling would otherwise hit every provider
-            # API on each request) and never rebind over the caller's scope.
-            path_token = _ANTHROPIC_CACHE_PATH.set(launch_cache)
-            try:
-                yield
-            finally:
-                _ANTHROPIC_CACHE_PATH.reset(path_token)
-            return
-        # A routed (foreign-home) scope is another account: never reuse the
-        # launch response, the launch Anthropic cache or the launch Claude plan.
-        cache_token = _USE_PROCESS_CACHE.set(False)
-        try:
-            yield
-        finally:
-            _USE_PROCESS_CACHE.reset(cache_token)
-        return
-    from tui_gateway.launch_profile_policy import launch_secret_scope
-
-    if get_hermes_home().resolve() != home.resolve():
-        from agent.secret_scope import UnscopedSecretError
-        raise UnscopedSecretError()
-    token = set_secret_scope(launch_secret_scope(home))
-    path_token = _ANTHROPIC_CACHE_PATH.set(launch_cache)
-    try:
-        yield
-    finally:
-        _ANTHROPIC_CACHE_PATH.reset(path_token)
-        reset_secret_scope(token)
+        from agent.secret_scope import current_secret_scope
+        from hermes_constants import get_hermes_home, get_process_hermes_home
+    except ImportError:
+        return "missing"
+    if current_secret_scope() is None:
+        return "missing"
+    return "launch" if get_hermes_home().resolve() == get_process_hermes_home().resolve() else "routed"
 
 
 @router.get("/usage")
 def get_usage():
-    with _usage_scope():
-        return _get_usage()
+    mode = _scope_mode()
+    if mode == "missing":
+        return _missing_scope_payload()
+    if mode == "routed":
+        # A routed (foreign-home) scope is another account: never reuse launch responses or caches.
+        token = _USE_PROCESS_CACHE.set(False)
+        try:
+            return _collect()
+        finally:
+            _USE_PROCESS_CACHE.reset(token)
+    return _get_usage()
 
 
 def _response_cache_is_fresh(now: float) -> bool:

@@ -7,7 +7,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_installer():
-    spec = importlib.util.spec_from_file_location("install_desktop_test", ROOT / "scripts" / "install_desktop.py")
+    script = ROOT / "scripts" / "legacy" / "install_desktop.py"
+    spec = importlib.util.spec_from_file_location("install_desktop_test", script)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)

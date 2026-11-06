@@ -1,21 +1,11 @@
-# Installation completed
+# AI Usage is installed
 
-The Python backend is installed and enabled.
+That is all: Hermes Desktop loads the status-bar chip from the installed plugin. If the **AI** chip does not
+appear in the status bar, run **Reload desktop plugins** from the command palette.
 
-Install the Hermes Desktop status-bar UI:
+- The chip shows the quota of the provider your focused session is using. Click it for every provider.
+- Agents can ask `usage_availability` (or you can type `/usage-availability`) which subscription still has quota.
+- Kimi and Z.ai use the keys Hermes already has (`KIMI_API_KEY`, `GLM_API_KEY` / `ZAI_API_KEY`).
+- Settings (thresholds, alerts, optional Kimi Desktop log) are under **Settings → Plugins → AI Usage**.
 
-**Windows PowerShell**
-
-```powershell
-python "$env:LOCALAPPDATA\hermes\plugins\usage-dashboard\scripts\install_desktop.py"
-```
-
-**macOS or Linux**
-
-```bash
-python "${HERMES_HOME:-$HOME/.hermes}/plugins/usage-dashboard/scripts/install_desktop.py"
-```
-
-Then restart the Hermes gateway. If the status-bar indicator does not appear automatically, run **Reload desktop plugins** from the Hermes Desktop command palette.
-
-Read `README.md` and `docs/USER_GUIDE.md` for provider setup and troubleshooting.
+Check the install with `hermes plugins doctor usage-dashboard`. See `README.md` for what the plugin reads and sends.
