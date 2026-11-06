@@ -1,49 +1,54 @@
 # Privacy
 
-Hermes Usage Dashboard is designed for local use and does not operate a remote service.
+AI Usage is designed for local use and does not operate a remote service.
 
-## Data accessed
+## What it reads
 
 Depending on the provider, the local backend may access:
 
-- OAuth access tokens or API keys already configured in Hermes
-- Subscription usage percentages and reset times
-- Plan labels and credit balances
-- Optional Kimi Desktop subscription log entries
+- **Codex:** nothing credential-related. It calls Hermes's own usage fetcher, which holds the sign-in.
+- **Claude Code:** the OAuth token Hermes resolves for Anthropic, in memory, for one request.
+- **Kimi and Z.ai:** the API keys `KIMI_API_KEY` / `KIMI_CODING_API_KEY` and `GLM_API_KEY` / `ZAI_API_KEY` / `Z_AI_API_KEY`, read from the active profile's secret scope.
+- **Nous:** the account information returned by Hermes's Nous Portal helper (credit totals and plan).
+- **Kimi Desktop log (off by default):** only when you turn on the `kimi_desktop_log_fallback` setting, up to 2 MB of Kimi Desktop's own local log file.
+- Its own settings (`plugins.entries.usage-dashboard.settings`).
 
-## Data sent to provider services
+It does not read the Claude CLI's account file, `.env` files, `auth.json`, a browser profile or any other tool's credential store.
 
-The backend sends the credential required by each provider only to that provider's official usage endpoint. It does not send provider credentials to any third party.
+## Network requests
+
+The credential a provider needs goes only to that provider's usage endpoint, and to no third party:
+
+- `api.anthropic.com/api/oauth/usage` (Bearer token; `User-Agent: hermes-usage-dashboard/<version>`)
+- `api.kimi.com/coding/v1/usages`
+- `api.z.ai/api/monitor/usage/quota/limit` and `api.z.ai/api/biz/subscription/list`
+- Codex and Nous requests are made by Hermes itself, not by this plugin.
+
+There is no telemetry, analytics, advertising, crash reporting or remote logging, and the plugin never updates itself.
 
 ## Data sent to the desktop frontend
 
-Only sanitized display data is returned:
+Only sanitized display data is returned: provider name, availability state, plan label, usage percentages, reset times, credit totals, whether a window caps a single model, alert thresholds, static error explanations and provider-neutral source labels. The frontend never receives credentials, authorization headers, email addresses, account IDs, OAuth claims or raw API responses.
 
-- Provider name
-- Availability state
-- Plan label
-- Usage percentages
-- Reset times
-- Credit totals
-- Static error explanations
-- Provider-neutral source labels
+## What it stores
 
-The frontend does not receive raw credentials, authorization headers, email addresses, account IDs, OAuth claims, or raw API responses.
+In the plugin data directory (`plugin-data/usage-dashboard`, per profile):
 
-## Local storage
+- `availability.json`: per provider, a state (`ok`, `low`, `exhausted`, `unknown`), a rounded remaining percentage, a window name and a reset time. Other plugins and the `usage_availability` tool read it read-only. It holds no tokens, accounts or e-mail addresses.
+- `anthropic-cache.json`: a sanitized copy of the last Claude usage card (5 minutes fresh, kept up to 24 hours as a rate-limit fallback).
 
-The plugin stores:
+In the Desktop plugin storage (per profile and connection):
 
-- The manually pinned status-bar selection
-- A sanitized last-good usage payload, expiring after 24 hours
-- A sanitized Claude usage cache used to reduce rate limiting
+- the manually pinned status-bar selection,
+- the last good sanitized usage payload (expires after 24 hours, at most 8 profiles kept),
+- the highest alert level already announced for each quota window.
 
-No secret is intentionally stored by this plugin.
+No secret is stored by this plugin.
 
-## Telemetry
+## Notifications
 
-The plugin contains no telemetry, analytics, advertising, crash reporting, or remote logging.
+When a quota window crosses a threshold, the plugin shows an in-app toast and a native OS notification containing the provider name, window name, used percentage and reset time. Nothing else.
 
 ## Deletion
 
-Uninstall the plugin and remove its desktop UI using the documented uninstall command. Any remaining sanitized cache can be removed from the Hermes cache and plugin storage directories.
+`hermes plugins remove usage-dashboard` removes the plugin. The data directory and the Desktop storage entries can then be deleted by hand.

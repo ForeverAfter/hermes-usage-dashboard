@@ -2,34 +2,53 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [1.4.0] - 2026-11-06
 
-### Fixed
-
-- Claude sessions at 1 % or less no longer show as 100 % used right after a 5-hour reset: utilization is read as the percent Anthropic returns (works around upstream Hermes #58226).
-- Cached usage is discarded as soon as any window's reset time passes, so a rolled-over window is never shown from cache.
-- Hermes 0.22+ binds the launch profile's secret scope on plugin routes itself; the plugin now recognizes that core-bound launch scope and keeps its response cache, Anthropic cache, and Claude plan label instead of re-querying every provider on each poll. Routed (foreign-home) profiles still bypass launch caches.
-- Preserve the Hermes profile secret scope and home context in parallel collectors.
-- Establish the launch-profile scope for unscoped plugin requests without disabling fail-closed protection.
-- Isolate launch-profile caches from requests with an existing secret scope.
-- Prioritize five-hour/current-session windows, then weekly, monthly, and other windows in cards and the status chip, including saved provider selections.
-- Keep a present session window with unavailable usage honest instead of substituting weekly usage.
-- Use the current Hermes Codex backend URL helper.
-- Label Z.ai monthly MCP quotas only for the verified type/unit/number combination.
-- Recover Claude plan labels from allowlisted local metadata for launch-profile requests.
+Catalog-admission release. Requires Hermes 0.22.5 or newer.
 
 ### Added
 
-- Deep allowlists for backend responses and frontend cached payloads.
-- A fixed, sanitized diagnostic category for missing profile scope.
-- Optional plan-renewal display support, distinct from quota-window resets.
-- Context propagation, isolation, restoration, and real-core offline regression tests.
-- Executable Node tests for status-chip selection and window priority.
+- `availability.json` in the plugin data directory, rewritten after every collection: per provider `ok` / `low` / `exhausted` / `unknown`, remaining percent, governing window and reset time. Facts only, no tokens or accounts.
+- Agent tool `usage_availability` and command `/usage-availability`: which subscription still has quota and when an exhausted one comes back.
+- Threshold alerts: an in-app toast and a native notification when a window crosses the warning (80 %) or critical (95 %) used percent. Thresholds, the low-quota threshold and alerts on/off are plugin settings.
+- `plugin.yaml`: `requires_hermes`, `license`, `homepage`, manifest v2, `config_schema`, optional env declarations and the declared tool.
+- English README, Spanish README (`README.es.md`) and a rewritten PRIVACY with a "what it reads / what it sends" table.
+- Window `scope` (`account` or `model`) in the response; model-capped windows are labelled "(model cap)".
+- Tests: scope isolation of the frontend cache, discarding of late responses, model caps, alerts, the availability contract and a no-credential regression over every card and published file.
+
+### Changed
+
+- Codex is read through Hermes's public usage fetcher (`read_only=True`); the plugin no longer holds the ChatGPT sign-in.
+- Kimi and Z.ai keys are read with `get_secret` from the profile's secret scope instead of the runtime provider resolver.
+- Reading the Kimi Desktop log is off by default (`kimi_desktop_log_fallback`).
+- The Claude usage cache moved to the plugin data directory.
+- The frontend cache, query key and alert memory are keyed by profile and connection; the unscoped cache from earlier versions is removed on first load.
+- Installation is one command; the desktop copier moved to `scripts/legacy/` (Hermes older than 0.22).
+- Private Hermes imports dropped from ten to one (the Nous Portal helper).
+
+### Removed
+
+- The plugin no longer reads the Claude CLI's account file, so the Claude plan label is gone.
+- The plugin no longer identifies itself as Claude Code or Codex in request headers.
+- The plugin no longer binds a Hermes secret scope; a request without one reports `missing_profile_scope`.
+
+### Fixed
+
+- A response that arrives after the profile or gateway route changed is dropped instead of being shown under the wrong profile.
+- Opus / Sonnet weekly caps no longer pose as the account quota in the status bar, the summary or the alerts.
+- Claude sessions at 1 % or less no longer show as 100 % used right after a 5-hour reset: utilization is read as the percent Anthropic returns (works around upstream Hermes #58226).
+- Cached usage is discarded as soon as any window's reset time passes, so a rolled-over window is never shown from cache.
+- Five-hour/current-session windows are prioritized, then weekly, monthly and other windows, in cards and the status chip, including saved provider selections.
+- A present session window with unavailable usage stays honest instead of being replaced by weekly usage.
+- Z.ai monthly MCP quotas are labelled only for the verified type/unit/number combination.
 
 ### Limitations
 
-- Existing request scopes bypass launch caches, which may increase provider requests.
-- The optional Kimi Desktop log fallback remains local to the operating-system user; complete cross-account isolation is not claimed.
+- Claude is still parsed by the plugin because Hermes core misreads values of 1 % or less (#58226); that block goes away once core is fixed.
+- `availability.json` is refreshed while Hermes Desktop is open (it is written when the backend collects); otherwise it ages to `unknown`.
+- Hermes 0.23 has no `usage_extra` hook, so `/usage` itself is unchanged; `/usage-availability` is the CLI and gateway equivalent.
+- Kimi and Z.ai now need the key in the profile's environment; a key held only in a credential pool is not seen.
+- The interface is in English.
 
 ## [1.3.2] - 2026-08-25
 

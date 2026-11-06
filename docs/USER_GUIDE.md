@@ -59,9 +59,12 @@ The **Refresh** button requests the backend cache. Provider calls are protected 
 
 ### The popover cannot load usage
 
-- Confirm the plugin is enabled in the active Hermes profile.
+- Confirm the plugin is enabled in the active Hermes profile and that Hermes is 0.22.5 or newer.
 - Restart the profile gateway after installation or updates.
-- Confirm the desktop UI installer was run for the same `HERMES_HOME`.
+- If the **AI** chip is missing, run **Reload desktop plugins** from the command palette and
+  `hermes plugins doctor usage-dashboard` (it reports a stale desktop copy).
+- A card that says "requires an active Hermes profile scope" means Hermes did not bind a profile for that request;
+  the plugin never creates one itself. Update Hermes.
 
 ### Claude shows `STALE`
 
@@ -69,7 +72,9 @@ Anthropic may temporarily rate-limit the usage endpoint even while Claude Code i
 
 ### Kimi shows `LOCAL`
 
-The live Kimi endpoint was unavailable or no Kimi Coding key was found. On supported systems the plugin may parse the latest Kimi Desktop subscription log. Open Kimi Desktop to refresh that local state.
+The live Kimi endpoint was unavailable or no Kimi Coding key was found, and you turned on **Read the Kimi Desktop log**
+in the plugin's settings (it is off by default). The plugin then parses the latest Kimi Desktop subscription log.
+Open Kimi Desktop to refresh that local state.
 
 ### A provider is missing a monthly or weekly card
 
@@ -77,4 +82,22 @@ The provider did not expose that window. The plugin deliberately avoids inferrin
 
 ## Profiles
 
-Hermes profiles have separate plugin configuration and desktop directories. Install and enable the backend for each profile that should expose usage, and run the desktop installer with that profile's `HERMES_HOME` when using an isolated desktop plugin directory.
+The status bar, its cached values and its alerts are kept per profile and per connection: switching profile never
+shows another profile's quota. Install and enable the plugin in each profile that should expose usage.
+
+## Alerts and settings
+
+Under **Settings → Plugins → AI Usage** you can change:
+
+- the warning and critical thresholds (80 % and 95 % used by default) and turn alerts off;
+- the "low quota" threshold used for `availability.json` (15 % remaining by default);
+- whether Kimi Desktop's log may be read as a fallback (off by default).
+
+When a window crosses a threshold you get an in-app toast and, while Hermes is in the background, a native notification.
+Model-capped windows (Opus / Sonnet weekly) never raise alerts.
+
+## Asking an agent what quota is left
+
+The `usage_availability` tool (and the `/usage-availability` command in the CLI and messaging gateways) reports which
+subscriptions have quota and when an exhausted one comes back. The data comes from `availability.json`, refreshed
+while Hermes Desktop is open; anything older than 15 minutes is reported as `unknown`.
