@@ -190,7 +190,7 @@ def test_reader_keeps_only_contract_fields(tmp_path, monkeypatch):
         "generated_at": "2026-11-06T12:00:00Z",
         "providers": {
             "anthropic": {"state": "ok", "remaining_percent": 50, "window": "week", "reset_at": None,
-                          "stale": False, "email": "someone@example.invalid", "token": "x"},
+                          "stale": False, "email": "redacted-address", "token": "x"},
             "zai": {"state": "bogus"},
         },
     }), encoding="utf-8")

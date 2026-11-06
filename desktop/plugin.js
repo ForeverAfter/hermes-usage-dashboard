@@ -8,18 +8,61 @@ import {
   useQuery,
   useValue
 } from '@hermes/plugin-sdk'
+import * as sdk from '@hermes/plugin-sdk'
 import { useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'usage-dashboard'
-const QUERY_KEY = [ID, 'usage']
-const USAGE_CACHE_KEY = 'last-good-usage'
+const LEGACY_USAGE_CACHE_KEY = 'last-good-usage' // unscoped (pre-1.4): may belong to another profile
+const USAGE_CACHE_KEY = 'last-good-usage-v2'
+const CACHE_INDEX_KEY = 'usage-cache-index-v2'
+const ALERT_STATE_KEY = 'alert-state-v1'
+const MAX_SCOPES_KEPT = 8
 const USAGE_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000
 const AUTO_SELECTION = '__auto_session__'
 const SELECTION_KEY = 'statusbar-selection-v2'
+const DEFAULT_ALERTS = { enabled: true, warn: 80, critical: 95 }
 const $statusSelection = atom(AUTO_SELECTION)
 const $runtimeInfoBySession = atom({})
+const $noValue = atom('')
+const memoryAlertState = new Map()
 let pluginCtx = null
+
+// ctx.storage is app-level: one root for every profile, gateway and remote machine. Everything the
+// plugin keeps there (and every query it caches) is keyed by the profile and connection it came from,
+// and a response is dropped if the active route changed while it was in flight.
+function activationEpoch() {
+  return typeof sdk.gatewayActivationEpoch === 'function' ? sdk.gatewayActivationEpoch() : 0
+}
+
+function readUsageScope() {
+  const profile = String(host.state.profile?.get?.() || 'default')
+  let connection = ''
+  let persist = true
+  try {
+    const routes = typeof host.profileRoutes === 'function' ? host.profileRoutes() || [] : []
+    const same = routes.filter(route => route && route.profile === profile)
+    if (same.length === 1 && same[0].connectionId) connection = String(same[0].connectionId)
+    // Two sources expose this profile name and none is marked active: keep the data in memory only.
+    else if (same.length > 1) persist = false
+  } catch {
+    persist = false
+  }
+  const epoch = activationEpoch()
+  const key = `${profile}|${connection}`
+  return { key, persist, epoch, queryKey: [ID, 'usage', key, epoch] }
+}
+
+function useUsageScope() {
+  useValue(host.state.profile || $noValue) // re-render when the profile or the gateway route changes
+  useValue(host.state.gateway || $noValue)
+  return readUsageScope()
+}
+
+function scopeIsCurrent(scope) {
+  const now = readUsageScope()
+  return now.key === scope.key && now.epoch === scope.epoch
+}
 
 function clamp(value) {
   return Math.max(0, Math.min(100, Number(value) || 0))
@@ -50,9 +93,24 @@ function selectableWindows(data) {
         providerId: provider.provider,
         provider: provider.label,
         window: window.label,
+        scope: window.scope === 'model' ? 'model' : 'account',
         remaining: window.remaining_percent == null ? null : clamp(window.remaining_percent)
       }))
   )
+}
+
+const MODEL_FAMILIES = ['opus', 'sonnet']
+
+// A model-scoped window (Opus week, Sonnet week) caps one model family, never the account: it only
+// speaks for the status bar when the session is actually running that family.
+function modelWindowApplies(windowLabel, model) {
+  const label = String(windowLabel || '').toLowerCase()
+  const current = String(model || '').toLowerCase()
+  return MODEL_FAMILIES.some(family => label.includes(family) && current.includes(family))
+}
+
+function eligibleOptions(options, runtime) {
+  return options.filter(option => option.scope !== 'model' || modelWindowApplies(option.window, runtime?.model))
 }
 
 function usageProviderId(provider, model) {
@@ -100,13 +158,27 @@ function windowPriority(label) {
 
 function priorityOption(options) {
   return options.reduce((preferred, option) => {
-    if (!preferred || windowPriority(option.window) < windowPriority(preferred.window)) return option
+    if (!preferred) return option
+    const rank = windowPriority(option.window)
+    const preferredRank = windowPriority(preferred.window)
+    if (rank < preferredRank) return option
+    // Ties keep their order, except that the cap of the model in use wins when it is the tighter one.
+    if (
+      rank === preferredRank &&
+      option.scope === 'model' &&
+      preferred.scope !== 'model' &&
+      option.remaining != null &&
+      preferred.remaining != null &&
+      option.remaining < preferred.remaining
+    ) {
+      return option
+    }
     return preferred
   }, null)
 }
 
 function selectedStatus(data, selection, runtime) {
-  const options = selectableWindows(data)
+  const options = eligibleOptions(selectableWindows(data), runtime)
   const automaticOptions = runtime?.usageProvider
     ? options.filter(option => option.providerId === runtime.usageProvider)
     : []
@@ -136,7 +208,20 @@ function sanitizeWindow(window) {
     used_percent: Number.isFinite(window?.used_percent) ? window.used_percent : null,
     remaining_percent: Number.isFinite(window?.remaining_percent) ? window.remaining_percent : null,
     reset_at: typeof window?.reset_at === 'string' ? window.reset_at : null,
-    detail: typeof window?.detail === 'string' ? window.detail : null
+    detail: typeof window?.detail === 'string' ? window.detail : null,
+    scope: window?.scope === 'model' ? 'model' : 'account'
+  }
+}
+
+function sanitizeSettings(settings) {
+  const percent = (value, fallback) =>
+    Number.isFinite(value) && value >= 1 && value <= 100 ? value : fallback
+  const warn = percent(settings?.alert_warn_percent, DEFAULT_ALERTS.warn)
+  const critical = percent(settings?.alert_critical_percent, DEFAULT_ALERTS.critical)
+  return {
+    alerts_enabled: settings?.alerts_enabled !== false,
+    alert_warn_percent: critical > warn ? warn : DEFAULT_ALERTS.warn,
+    alert_critical_percent: critical > warn ? critical : DEFAULT_ALERTS.critical
   }
 }
 
@@ -164,6 +249,7 @@ function sanitizedUsage(payload) {
   return JSON.parse(JSON.stringify({
     fetched_at: payload?.fetched_at || null,
     summary: payload?.summary || null,
+    settings: sanitizeSettings(payload?.settings),
     providers: Array.isArray(payload?.providers) ? payload.providers.map(sanitizeProvider) : [],
     privacy: typeof payload?.privacy === 'string' ? payload.privacy : null
   }))
@@ -194,7 +280,10 @@ function mergeProviderFallback(payload, previous) {
   })
   const remaining = providers.flatMap((provider) =>
     provider.available
-      ? (provider.windows || []).map((window) => window.remaining_percent).filter(Number.isFinite)
+      ? (provider.windows || [])
+          .filter((window) => window.scope !== 'model')
+          .map((window) => window.remaining_percent)
+          .filter(Number.isFinite)
       : []
   )
   return {
@@ -209,36 +298,142 @@ function mergeProviderFallback(payload, previous) {
   }
 }
 
-function saveUsageCache(payload) {
-  if (payload?.providers?.some((provider) => provider.usage_fallback)) return
-  pluginCtx.storage.set(USAGE_CACHE_KEY, {
+// Persisted last-good payloads, one entry per profile+connection. A small index bounds how many.
+function storageKey(base, scope) {
+  return `${base}:${scope.key}`
+}
+
+function rememberScope(scope) {
+  const index = pluginCtx.storage.get(CACHE_INDEX_KEY, [])
+  const known = Array.isArray(index) ? index.filter(key => key !== scope.key) : []
+  known.push(scope.key)
+  while (known.length > MAX_SCOPES_KEPT) {
+    const dropped = known.shift()
+    pluginCtx.storage.remove(`${USAGE_CACHE_KEY}:${dropped}`)
+    pluginCtx.storage.remove(`${ALERT_STATE_KEY}:${dropped}`)
+  }
+  pluginCtx.storage.set(CACHE_INDEX_KEY, known)
+}
+
+function saveUsageCache(payload, scope) {
+  if (!scope.persist || payload?.providers?.some((provider) => provider.usage_fallback)) return
+  rememberScope(scope)
+  pluginCtx.storage.set(storageKey(USAGE_CACHE_KEY, scope), {
     saved_at: Date.now(),
     payload: sanitizedUsage(payload)
   })
 }
 
-function loadUsageCache() {
-  const entry = pluginCtx.storage.get(USAGE_CACHE_KEY, null)
+function loadUsageCache(scope) {
+  if (!scope.persist) return null
+  const key = storageKey(USAGE_CACHE_KEY, scope)
+  const entry = pluginCtx.storage.get(key, null)
   if (!entry?.payload || !Number.isFinite(entry.saved_at)) return null
   if (Date.now() - entry.saved_at > USAGE_CACHE_MAX_AGE_MS) {
-    pluginCtx.storage.remove(USAGE_CACHE_KEY)
+    pluginCtx.storage.remove(key)
     return null
   }
   return sanitizedUsage(entry.payload)
 }
 
-async function fetchUsage(path = '/usage') {
+// --- threshold alerts -------------------------------------------------------------------------
+
+function alertSettings(payload) {
+  const settings = sanitizeSettings(payload?.settings)
+  return {
+    enabled: settings.alerts_enabled,
+    warn: settings.alert_warn_percent,
+    critical: settings.alert_critical_percent
+  }
+}
+
+function alertLevel(used, settings) {
+  if (used >= settings.critical) return 2
+  if (used >= settings.warn) return 1
+  return 0
+}
+
+// A window is identified by provider, label and reset minute (so jitter in the timestamp does not
+// re-arm it). The first sighting only records the level: crossing means seeing it go up.
+function evaluateAlerts(payload, previous) {
+  const settings = alertSettings(payload)
+  const next = { ...(previous || {}) }
+  const alerts = []
+  if (!settings.enabled || payload?.transport_stale) return { alerts, state: next }
+  for (const provider of payload?.providers || []) {
+    if (!provider.available || provider.stale || provider.usage_fallback || provider.local) continue
+    for (const window of provider.windows || []) {
+      if (window.scope === 'model' || !Number.isFinite(window.used_percent)) continue
+      const resetMinute = window.reset_at ? Math.round(Date.parse(window.reset_at) / 60000) : 0
+      const key = `${provider.provider}::${window.label}`
+      const level = alertLevel(window.used_percent, settings)
+      const before = next[key]
+      next[key] = { level, reset: Number.isFinite(resetMinute) ? resetMinute : 0 }
+      if (!before) continue
+      const sameWindow = before.reset === next[key].reset
+      if (level > 0 && (!sameWindow || level > before.level)) {
+        alerts.push({
+          level,
+          provider: provider.label || provider.provider,
+          window: window.label,
+          used: window.used_percent,
+          reset_at: window.reset_at
+        })
+      }
+    }
+  }
+  return { alerts, state: next }
+}
+
+function showAlerts(alerts) {
+  for (const alert of alerts) {
+    const critical = alert.level >= 2
+    const title = `${alert.provider}: ${critical ? 'quota almost exhausted' : 'quota warning'}`
+    const reset = formatDate(alert.reset_at)
+    const body = `${alert.window}: ${formatPercent(alert.used)} used${reset ? ` · resets ${reset}` : ''}`
+    try {
+      host.notify({ kind: critical ? 'warning' : 'info', title, message: body })
+    } catch {}
+    try {
+      // Native notification; Hermes shows it only while the app is in the background.
+      pluginCtx?.os?.notify?.({ title, body })
+    } catch {}
+  }
+}
+
+function runAlerts(payload, scope) {
+  const persisted = scope.persist
+    ? pluginCtx.storage.get(storageKey(ALERT_STATE_KEY, scope), null)
+    : memoryAlertState.get(scope.key)
+  const { alerts, state } = evaluateAlerts(payload, persisted || {})
+  if (scope.persist) {
+    rememberScope(scope)
+    pluginCtx.storage.set(storageKey(ALERT_STATE_KEY, scope), state)
+  } else {
+    memoryAlertState.set(scope.key, state)
+  }
+  showAlerts(alerts)
+}
+
+// Returns null when the active profile or route changed while the request was in flight: that
+// response belongs to a scope nobody is looking at any more and must not be shown, cached or alerted.
+async function fetchUsage(scope = readUsageScope(), path = '/usage') {
   if (!pluginCtx) throw new Error('Usage plugin is not initialized')
   try {
     const payload = await pluginCtx.rest(path, { timeoutMs: 35000 })
+    if (!scopeIsCurrent(scope)) return null
     const clean = sanitizedUsage(payload)
-    const previous = queryClient.getQueryData(QUERY_KEY) || loadUsageCache()
+    const previous = queryClient.getQueryData(scope.queryKey) || loadUsageCache(scope)
     const fresh = { ...mergeProviderFallback(clean, previous), transport_stale: false }
-    saveUsageCache(fresh)
+    saveUsageCache(fresh, scope)
+    try {
+      runAlerts(fresh, scope)
+    } catch {}
     return fresh
   } catch (error) {
-    const memoryCache = queryClient.getQueryData(QUERY_KEY)
-    const storedCache = loadUsageCache()
+    if (!scopeIsCurrent(scope)) return null
+    const memoryCache = queryClient.getQueryData(scope.queryKey)
+    const storedCache = loadUsageCache(scope)
     const cached = memoryCache?.providers?.length ? sanitizedUsage(memoryCache) : storedCache
     if (cached?.providers?.length) {
       return {
@@ -252,9 +447,10 @@ async function fetchUsage(path = '/usage') {
 }
 
 function useUsage() {
+  const scope = useUsageScope()
   return useQuery({
-    queryKey: QUERY_KEY,
-    queryFn: () => fetchUsage(),
+    queryKey: scope.queryKey,
+    queryFn: () => fetchUsage(scope),
     refetchInterval: 60000,
     staleTime: 30000,
     retry: 1
@@ -294,7 +490,11 @@ function CompactWindow({ provider, window, selectedValue }) {
       jsxs('div', {
         className: 'flex items-baseline justify-between gap-3 text-xs',
         children: [
-          jsx('span', { className: 'min-w-0 truncate text-(--ui-text-secondary)', children: window.label }),
+          jsx('span', {
+            className: 'min-w-0 truncate text-(--ui-text-secondary)',
+            title: window.scope === 'model' ? 'Caps one model family only; it does not mean the account is out of quota.' : undefined,
+            children: window.scope === 'model' ? `${window.label} (model cap)` : window.label
+          }),
           window.remaining_percent == null
             ? jsx('span', { className: 'shrink-0 text-(--ui-text-quaternary)', children: 'No percentage' })
             : jsx('button', {
@@ -411,8 +611,10 @@ function UsageCompactPanel() {
     event?.stopPropagation?.()
     setRefreshing(true)
     try {
-      const payload = await fetchUsage('/usage')
-      queryClient.setQueryData(QUERY_KEY, payload)
+      const scope = readUsageScope()
+      const payload = await fetchUsage(scope)
+      if (!payload) return // the profile or route changed while loading: nothing to show here
+      queryClient.setQueryData(scope.queryKey, payload)
       if (payload.transport_stale) {
         host.notify({ kind: 'info', message: 'Showing the last saved usage data; this profile has not loaded the backend yet.' })
       }
@@ -558,9 +760,12 @@ export default {
   defaultEnabled: true,
   register(ctx) {
     pluginCtx = ctx
-    const existingUsage = queryClient.getQueryData(QUERY_KEY)
+    // The pre-1.4 cache had no profile in its key, so it may hold another profile's quota: drop it.
+    ctx.storage.remove(LEGACY_USAGE_CACHE_KEY)
+    const scope = readUsageScope()
+    const existingUsage = queryClient.getQueryData(scope.queryKey)
     if (existingUsage?.providers?.length && !existingUsage.transport_stale) {
-      saveUsageCache(existingUsage)
+      saveUsageCache(existingUsage, scope)
     }
     $statusSelection.set(ctx.storage.get(SELECTION_KEY, AUTO_SELECTION))
 

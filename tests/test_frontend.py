@@ -50,6 +50,23 @@ def test_frontend_displays_plan_renewal_cutoff():
     assert "Plan renewal / cutoff" in source
 
 
+def test_frontend_scopes_cache_and_responses_to_profile_connection_and_epoch():
+    source = (ROOT / "desktop" / "plugin.js").read_text(encoding="utf-8")
+    assert "QUERY_KEY" not in source  # no query or cache key without a profile in it
+    assert "queryKey: [ID, 'usage', key, epoch]" in source
+    assert "last-good-usage-v2" in source
+    assert "typeof sdk.gatewayActivationEpoch === 'function'" in source  # the export only exists on Hermes >= 0.23
+    assert source.count("scopeIsCurrent(scope)") >= 2
+    assert "ctx.storage.remove(LEGACY_USAGE_CACHE_KEY)" in source
+
+
+def test_frontend_stays_inside_the_plugin_sdk_surface():
+    source = (ROOT / "desktop" / "plugin.js").read_text(encoding="utf-8")
+    for forbidden in ("document.", "window.hermesDesktop", "eval(", "new Function", "prototype", "innerHTML"):
+        assert forbidden not in source, forbidden
+    assert source.count("from '@hermes/plugin-sdk'") == 2  # the named SDK imports and the optional-export namespace
+
+
 def test_frontend_badges_distinguish_stale_and_local_sources():
     source = (ROOT / "desktop" / "plugin.js").read_text(encoding="utf-8")
     stale_position = source.index("provider.usage_fallback || provider.stale")
