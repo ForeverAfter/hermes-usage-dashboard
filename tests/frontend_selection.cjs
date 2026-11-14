@@ -368,6 +368,24 @@ test('alerts fire when a window crosses the warning and critical thresholds, onc
   assert.deepEqual(step.alerts, [])
 })
 
+// U3: a window that is already critical the first time it is seen alerts once; a first reading at the
+// warning level stays silent (no burst of warnings at start-up), and later readings are deduplicated.
+test('a first reading that is already critical alerts once', () => {
+  const env = makeEnv()
+  const evaluate = (percent, previous) =>
+    env.json(`evaluateAlerts(${JSON.stringify(payloadFor([used('Session', percent)]))}, ${JSON.stringify(previous)})`)
+  let step = evaluate(96, {})
+  assert.equal(step.alerts.length, 1)
+  assert.equal(step.alerts[0].level, 2)
+  step = evaluate(97, step.state)
+  assert.deepEqual(step.alerts, []) // told once
+  step = evaluate(99, step.state)
+  assert.deepEqual(step.alerts, [])
+  const warnFirst = evaluate(85, {})
+  assert.deepEqual(warnFirst.alerts, []) // a first warning-level reading only records the level
+  assert.equal(evaluate(96, warnFirst.state).alerts[0].level, 2)
+})
+
 test('a new window after a reset can alert again; a lower reading re-arms the level', () => {
   const env = makeEnv()
   const evaluate = (windows, previous) =>
@@ -422,7 +440,9 @@ test('crossing a threshold shows an in-app toast and a native notification, reme
   env.profile.set('B') // another profile has its own alert memory
   env.restImpl = async () => payloadFor([used('Session', 96)])
   await env.run('fetchUsage()')
-  assert.equal(env.osNotifications.length, 1) // first sighting under B only records the level
+  assert.equal(env.osNotifications.length, 2) // already critical when B first sees it: told once (U3)
+  await env.run('fetchUsage()')
+  assert.equal(env.osNotifications.length, 2)
   assert.ok(env.store.has('alert-state-v1:A|'))
   assert.ok(env.store.has('alert-state-v1:B|'))
 })

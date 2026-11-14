@@ -394,7 +394,9 @@ function alertLevel(used, settings) {
 }
 
 // A window is identified by provider, label and reset minute (so jitter in the timestamp does not
-// re-arm it). The first sighting only records the level: crossing means seeing it go up.
+// re-arm it). Crossing means seeing the level go up. The first sighting only records the level, except
+// that a window already critical when first seen alerts once (otherwise it would never be announced);
+// a first reading at the warning level stays silent so start-up does not raise a burst of warnings.
 function evaluateAlerts(payload, previous) {
   const settings = alertSettings(payload)
   const next = { ...(previous || {}) }
@@ -409,9 +411,10 @@ function evaluateAlerts(payload, previous) {
       const level = alertLevel(window.used_percent, settings)
       const before = next[key]
       next[key] = { level, reset: Number.isFinite(resetMinute) ? resetMinute : 0 }
-      if (!before) continue
-      const sameWindow = before.reset === next[key].reset
-      if (level > 0 && (!sameWindow || level > before.level)) {
+      const announce = before
+        ? level > 0 && (before.reset !== next[key].reset || level > before.level)
+        : level >= 2
+      if (announce) {
         alerts.push({
           level,
           provider: provider.label || provider.provider,
