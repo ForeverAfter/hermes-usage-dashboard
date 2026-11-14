@@ -96,3 +96,15 @@ def test_disclosure_texts_describe_the_real_behavior():
     # 3. Model caps: only the status-bar chip, never the summary, alerts or availability.json.
     assert "unless the session runs" not in notes
     assert "only the status-bar chip" in notes
+
+
+def test_alert_texts_describe_last_level_and_once_per_crossing():
+    """N3: the memory holds the last observed level; alerts fire once per crossing and re-arm after a drop;
+    homonymous sources may repeat a critical alert once per activation."""
+    guide = (ROOT / "docs" / "USER_GUIDE.md").read_text(encoding="utf-8")
+    privacy = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
+    assert "once per window" not in guide
+    assert "highest alert level" not in privacy
+    assert "once per crossing" in guide and "re-arms" in guide
+    assert "once per activation" in guide
+    assert "last alert level observed" in privacy and "once each time it is activated" in privacy

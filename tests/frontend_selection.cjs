@@ -529,6 +529,32 @@ test('in-memory alert state of two homonymous sources is kept apart by the epoch
   assert.deepEqual([...env.store.keys()].filter(key => key.includes('alert')), []) // still nothing persisted
 })
 
+// N3: documented on purpose (USER_GUIDE "Alerts", PRIVACY). Two sources sharing a profile name cannot
+// be told apart safely, so their alert memory lives one activation (epoch) at a time: returning to a
+// source that is still critical announces it again, once per activation, never twice in the same one.
+test('a critical source is announced again once per activation when homonymous sources alternate', async () => {
+  const routes = [{ profile: 'main', connectionId: 'local-1' }, { profile: 'main', connectionId: 'ssh-9' }]
+  const env = makeEnv({ profile: 'main', routes, epoch: 1 })
+  env.run('plugin.register(ctx)')
+  const sourceA = async () => payloadFor([used('Session', 97)]) // same percentage and reset throughout
+  const sourceB = async () => payloadFor([used('Session', 50)])
+  env.restImpl = sourceA
+  await env.run('fetchUsage()') // A critical, first sighting
+  await env.run('fetchUsage()') // same activation, unchanged: no repeat
+  assert.equal(env.osNotifications.length, 1)
+  env.epoch = 2
+  env.restImpl = sourceB
+  await env.run('fetchUsage()') // B healthy: silent
+  assert.equal(env.osNotifications.length, 1)
+  env.epoch = 3
+  env.restImpl = sourceA
+  await env.run('fetchUsage()') // back to A, nothing changed on A: announced again (new activation)
+  await env.run('fetchUsage()') // ...but only once in that activation
+  assert.equal(env.osNotifications.length, 2)
+  assert.equal(env.notifications.length, 2)
+  assert.match(env.osNotifications[1].body, /Session: 97(\.0)?% used/)
+})
+
 test('notifications carry only the provider, window, percentage and reset time', async () => {
   const env = makeEnv()
   env.run('plugin.register(ctx)')

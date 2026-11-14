@@ -40,7 +40,9 @@ In the plugin data directory (`plugin-data/usage-dashboard`, per profile):
 In the Desktop plugin storage (per profile and connection):
 
 - the last good sanitized usage payload (expires after 24 hours, at most 8 profiles kept),
-- the highest alert level already announced for each quota window.
+- the last alert level observed for each quota window, with its reset time (used to alert once per crossing and to
+  re-arm after usage drops). When two sources expose the same profile name this state is kept in memory only, per
+  source activation, so a source that is still critical may be announced again once each time it is activated.
 
 In the Desktop plugin storage, app-wide (shared by every profile and connection):
 

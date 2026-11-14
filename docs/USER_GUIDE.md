@@ -103,9 +103,16 @@ Under **Settings → Plugins → AI Usage** you can change:
 - whether Kimi Desktop's log may be read as a fallback (off by default).
 
 When a window crosses a threshold you get an in-app toast and, while Hermes is in the background, a native notification.
-Each level is announced once per window. A window that is already past the critical threshold the first time the
-plugin sees it is announced once; one that is first seen at the warning level is only recorded, so opening Desktop
-does not raise a burst of warnings.
+The plugin remembers the last level it observed for each window, not the highest one.
+An alert fires once per crossing: when the level goes up from the last observed one, or when the window restarts (a new
+reset time) already at a warning or critical level. If usage drops back under a threshold and crosses it again in the
+same window, the alert re-arms and fires again. A window that is already past the critical threshold the first time the
+plugin sees it is announced once; one that is first seen at the warning level is only recorded, so opening Desktop does
+not raise a burst of warnings.
+When two sources (for example a local and an SSH gateway) expose the same profile name, the plugin cannot tell them
+apart safely, so it keeps their alert memory in memory only and per source activation. Switching back to a source
+that is still critical therefore announces it again, once per activation; nothing is repeated within the same
+activation and one source's levels never decide another's alerts.
 Model-capped windows (Opus / Sonnet weekly) never raise alerts.
 
 ## Asking an agent what quota is left
