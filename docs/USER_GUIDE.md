@@ -26,7 +26,10 @@ weekly cap of the model the session is running replaces that window only when it
 
 ### Pinned
 
-Click any percentage in the popover to pin that provider and window. The choice persists locally. Click **Follow session** to return to automatic mode.
+Click any percentage in the popover to pin its provider. The pin keeps the provider, not the window you clicked: the
+chip shows that provider's deciding window with the rule above, so it can change as the data changes. The choice
+persists locally as one app-wide preference, shared by every profile and connection. Click **Follow session** to
+return to automatic mode.
 
 ## Provider cards
 
@@ -88,8 +91,8 @@ The provider did not expose that window. The plugin deliberately avoids inferrin
 
 ## Profiles
 
-The status bar, its cached values and its alerts are kept per profile and per connection: switching profile never
-shows another profile's quota. Install and enable the plugin in each profile that should expose usage.
+Cached values and alert memory are kept per profile and per connection: switching profile never shows another
+profile's quota. The status-bar choice (Automatic or a pinned provider) is the one app-wide exception. Install and enable the plugin in each profile that should expose usage.
 
 ## Alerts and settings
 

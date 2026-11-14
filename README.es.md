@@ -7,7 +7,7 @@ Mira cuánto te queda de tus suscripciones de **Codex, Claude Code, Kimi, Z.ai y
 
 <!-- captura: docs/images/status-chip.png (el chip "AI 64%" de la barra de estado y el popover abierto) -->
 
-- **Sigue tu sesión.** El chip muestra la cuota del proveedor que la sesión enfocada está usando de verdad, o una ventana fijada si lo prefieres. Los topes semanales de Opus/Sonnet nunca se hacen pasar por la cuota de tu cuenta.
+- **Sigue tu sesión.** El chip muestra la cuota del proveedor que la sesión enfocada está usando de verdad, o un proveedor que fijes (una sola elección para toda la app). Los topes semanales de Opus/Sonnet nunca se hacen pasar por la cuota de tu cuenta.
 - **No miente cuando un proveedor falla.** Un valor viejo lleva la insignia `STALE`, uno local `LOCAL` y uno ausente `NO DATA`; una caché muere en cuanto se reinicia su ventana. La sesión de Claude al 1 % se ve como 1 %, no como 100 %.
 - **Los agentes pueden preguntar.** La herramienta `usage_availability` y el comando `/usage-availability` dicen qué suscripción aún tiene cuota y cuándo vuelve una agotada. Alertas al 80 % y al 95 % de uso.
 
@@ -36,7 +36,7 @@ Todo corre en tu equipo. No hay telemetría, analítica ni registro remoto, ni a
 
 Las credenciales nunca llegan a la interfaz, a los registros, a `availability.json` ni a ninguna caché. **No** lee el archivo de cuenta del CLI de Claude, ni `.env`, ni `auth.json`, ni credenciales de otra herramienta.
 
-Solo escribe en sus propios datos (`plugin-data/usage-dashboard`: `availability.json` y una caché de uso de Claude) y en el almacenamiento de plugins de Desktop (tu selección fijada, los últimos valores buenos y la memoria de alertas, por perfil). Detalles: [PRIVACY.md](PRIVACY.md), [SECURITY.md](SECURITY.md).
+Solo escribe en sus propios datos (`plugin-data/usage-dashboard`: `availability.json` y una caché de uso de Claude) y en el almacenamiento de plugins de Desktop (los últimos valores buenos y la memoria de alertas por perfil y conexión, más el proveedor fijado, que es para toda la app). Detalles: [PRIVACY.md](PRIVACY.md), [SECURITY.md](SECURITY.md).
 
 ## Para agentes y otros plugins
 
@@ -57,7 +57,7 @@ Los estados son `ok`, `low` (15 % o menos restante por omisión), `exhausted` (1
 ## Uso
 
 1. Haz clic en el chip **AI** de la barra de estado para ver cada proveedor, ventana, plan y hora de reinicio.
-2. Déjalo en **Automatic** para seguir la sesión enfocada, o haz clic en cualquier porcentaje para fijarlo. **Follow session** regresa al modo automático.
+2. Déjalo en **Automatic** para seguir la sesión enfocada, o haz clic en cualquier porcentaje para fijar su proveedor (el chip muestra entonces su ventana agotada o la menor entre sesión y semana; la elección es para toda la app). **Follow session** regresa al modo automático.
 3. **Refresh** está protegido por caché para no provocar límites de tasa de los proveedores.
 
 Consulta la [Guía de usuario](docs/USER_GUIDE.md) (en inglés) y las [Notas de proveedores](docs/PROVIDER_NOTES.md).

@@ -18,8 +18,9 @@ Provider usage APIs are not standardized and may change without notice.
   (upstream #58226), which would show a fresh 1 % session as 100 % used. It switches to the core fetcher once that
   is fixed.
 - May expose current-session and current-week windows, plus model-specific windows (Opus / Sonnet week). Those are
-  marked as model caps: they never decide the status bar, the summary or `availability.json` unless the session runs
-  that model.
+  marked as model caps. They can affect only the status-bar chip: when the focused session runs that model family and
+  the cap is stricter than the account window, the chip shows the cap. They never decide the provider summary
+  (`lowest_remaining_percent`), alerts or `availability.json`, whatever model is running.
 - The plan label is not shown: the plugin does not read the Claude CLI's account file.
 - Anthropic can return HTTP 429 for the usage endpoint while Claude Code inference still works. A sanitized launch-profile
   cache (plugin data directory) reduces duplicate requests; requests for another profile never use it.

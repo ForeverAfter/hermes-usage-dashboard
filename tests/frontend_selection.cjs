@@ -209,6 +209,23 @@ test('the cap of the model in use still wins when it is tighter than the session
   assert.equal(chosen('claude-opus-5-5').window, 'Current week')
 })
 
+// U8: the behaviour the disclosure texts describe. A pin is a provider (never a window) and it is one
+// app-wide preference, not a per-profile one.
+test('the pin is a provider and a single app-wide preference', async () => {
+  const env = makeEnv({ profile: 'A', routes: [{ profile: 'A', connectionId: 'local-1' }] })
+  env.run('plugin.register(ctx)')
+  env.run("persistSelection('anthropic::Current week')")
+  assert.equal(env.store.get('statusbar-selection-v2'), 'anthropic::Current week')
+  assert.deepEqual([...env.store.keys()].filter(key => key.startsWith('statusbar-selection')), ['statusbar-selection-v2'])
+  const other = makeEnv({ profile: 'B' }) // another profile reads the same stored pin
+  other.store.set('statusbar-selection-v2', env.store.get('statusbar-selection-v2'))
+  other.run('plugin.register(ctx)')
+  assert.equal(other.run('$statusSelection.get()'), 'anthropic::Current week')
+  // The pinned window does not stay: when the data changes, the provider's deciding window is shown.
+  const data = { providers: [provider('anthropic', [window('Current session', 10), window('Current week', 60)])] }
+  assert.equal(select(data, 'anthropic::Current week', 'openai-codex').selected.window, 'Current session')
+})
+
 // --- A7: per-model windows -------------------------------------------------------------------
 
 const modelData = () => ({ providers: [provider('anthropic', [

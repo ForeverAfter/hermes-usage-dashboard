@@ -39,9 +39,12 @@ In the plugin data directory (`plugin-data/usage-dashboard`, per profile):
 
 In the Desktop plugin storage (per profile and connection):
 
-- the manually pinned status-bar selection,
 - the last good sanitized usage payload (expires after 24 hours, at most 8 profiles kept),
 - the highest alert level already announced for each quota window.
+
+In the Desktop plugin storage, app-wide (shared by every profile and connection):
+
+- the status-bar choice: Automatic or the pinned provider (a provider id and window label, no usage data).
 
 No secret is stored by this plugin.
 

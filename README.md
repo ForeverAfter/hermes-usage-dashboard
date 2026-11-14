@@ -7,7 +7,7 @@ See how much of your **Codex, Claude Code, Kimi, Z.ai and Nous** subscriptions i
 
 <!-- screenshot: docs/images/status-chip.png (status-bar chip "AI 64%" and the open popover) -->
 
-- **Follows your session.** The chip shows the quota of the provider the focused session is actually using, and a pinned window if you prefer. Opus/Sonnet weekly caps never pose as your account quota.
+- **Follows your session.** The chip shows the quota of the provider the focused session is actually using, or a provider you pin (one app-wide choice). Opus/Sonnet weekly caps never pose as your account quota.
 - **Never lies when a provider is down.** Stale values are badged `STALE`, local ones `LOCAL`, missing ones `NO DATA`; a cache dies the moment its window resets. Claude's 1 % session is shown as 1 %, not 100 %.
 - **Agents can ask.** The `usage_availability` tool and the `/usage-availability` command say which subscription still has quota and when an exhausted one comes back. Alerts at 80 % and 95 % used.
 
@@ -36,7 +36,7 @@ Everything runs on your machine. There is no telemetry, analytics or remote logg
 
 Credentials never reach the interface, the logs, `availability.json` or any cache. It does **not** read the Claude CLI's account file, `.env`, `auth.json` or any other tool's credentials.
 
-It writes only inside its own data (`plugin-data/usage-dashboard`: `availability.json` and a Claude usage cache) and in the Desktop plugin storage (your pin, the last good values and alert memory, per profile). Details: [PRIVACY.md](PRIVACY.md), [SECURITY.md](SECURITY.md).
+It writes only inside its own data (`plugin-data/usage-dashboard`: `availability.json` and a Claude usage cache) and in the Desktop plugin storage (the last good values and alert memory per profile and connection, plus your pinned provider, which is app-wide). Details: [PRIVACY.md](PRIVACY.md), [SECURITY.md](SECURITY.md).
 
 ## For agents and other plugins
 
@@ -57,7 +57,7 @@ States are `ok`, `low` (15 % left or less by default), `exhausted` (1 % or less)
 ## Usage
 
 1. Click the **AI** status-bar chip to see every provider, window, plan and reset time.
-2. Leave it on **Automatic** to follow the focused session, or click any percentage to pin it. **Follow session** goes back.
+2. Leave it on **Automatic** to follow the focused session, or click any percentage to pin its provider (the chip then shows that provider's exhausted or lowest session/weekly window; the pin is app-wide). **Follow session** goes back.
 3. **Refresh** is cache-protected to avoid provider rate limits.
 
 See the [User Guide](docs/USER_GUIDE.md) and [Provider Notes](docs/PROVIDER_NOTES.md).

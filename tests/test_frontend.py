@@ -73,3 +73,26 @@ def test_frontend_badges_distinguish_stale_and_local_sources():
     local_position = source.index(": provider.local", stale_position)
     active_position = source.index(": provider.available", local_position)
     assert stale_position < local_position < active_position
+
+
+def test_disclosure_texts_describe_the_real_behavior():
+    """U8: pin = provider, the pin is app-wide, model caps only ever affect the chip."""
+    read = lambda name: (ROOT / name).read_text(encoding="utf-8")  # noqa: E731
+    readme, readme_es, guide, privacy, notes = (
+        read("README.md"), read("README.es.md"), read("docs/USER_GUIDE.md"), read("PRIVACY.md"),
+        read("docs/PROVIDER_NOTES.md"),
+    )
+    # 1. Pinning keeps the provider, not a window.
+    assert "pinned window" not in readme
+    assert "pin that provider and window" not in guide
+    assert "ventana fijada" not in readme_es
+    assert "pin its provider" in readme and "fijar su proveedor" in readme_es
+    # 2. The pin is one app-wide preference; the caches and alert memory are per profile and connection.
+    per_profile = privacy.split("In the Desktop plugin storage (per profile and connection):")[1].split("\n\n")[1]
+    assert "pinned" not in per_profile and "last good" in per_profile
+    for text in (readme, guide, privacy):
+        assert "app-wide" in text
+    assert "toda la app" in readme_es
+    # 3. Model caps: only the status-bar chip, never the summary, alerts or availability.json.
+    assert "unless the session runs" not in notes
+    assert "only the status-bar chip" in notes
