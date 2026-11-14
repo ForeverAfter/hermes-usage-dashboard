@@ -400,6 +400,29 @@ test('a new window after a reset can alert again; a lower reading re-arms the le
   assert.deepEqual(jitter.alerts, []) // seconds of jitter in the reset time are not a new window
 })
 
+// U4: the same logical reset reported a few seconds (or minutes) apart is the same window. Rounding to
+// the minute flipped at :30, so 15:00:29 / 15:00:31 alternating re-alerted every time.
+test('reset jitter within 5 minutes never re-arms an alert, across the minute boundary too', () => {
+  const env = makeEnv()
+  const evaluate = (reset, previous, percent = 90) =>
+    env.json(`evaluateAlerts(${JSON.stringify(payloadFor([used('Session', percent, { reset_at: reset })]))}, ${JSON.stringify(previous)})`)
+  let step = evaluate('2026-11-06T15:00:00Z', {}, 50)
+  step = evaluate('2026-11-06T15:00:29Z', step.state)
+  assert.equal(step.alerts.length, 1) // a real crossing
+  for (const reset of ['2026-11-06T15:00:31Z', '2026-11-06T15:00:29Z', '2026-11-06T15:00:31Z',
+    '2026-11-06T14:59:59Z', '2026-11-06T15:04:30Z', '2026-11-06T15:00:29Z']) {
+    step = evaluate(reset, step.state)
+    assert.deepEqual(step.alerts, [], reset)
+  }
+  const real = evaluate('2026-11-06T20:00:00Z', step.state)
+  assert.equal(real.alerts.length, 1) // a real reset is a new window
+  assert.equal(evaluate('2026-11-06T20:05:00Z', real.state).alerts.length, 0) // exactly 5 minutes: same window
+  assert.equal(evaluate('2026-11-06T20:05:01Z', real.state).alerts.length, 1) // beyond 5 minutes: new window
+  // State saved by 1.4.0 (reset rounded to the minute) still matches the same window.
+  const legacy = { 'openai-codex::Session': { level: 1, reset: Math.round(Date.parse('2026-11-06T15:00:31Z') / 60000) } }
+  assert.deepEqual(evaluate('2026-11-06T15:00:29Z', legacy).alerts, [])
+})
+
 test('alerts ignore stale, local, model-capped and disabled data and honor custom thresholds', () => {
   const env = makeEnv()
   const evaluate = (payload, previous) =>

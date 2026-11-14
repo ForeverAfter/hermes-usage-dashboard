@@ -393,10 +393,17 @@ function alertLevel(used, settings) {
   return 0
 }
 
-// A window is identified by provider, label and reset minute (so jitter in the timestamp does not
-// re-arm it). Crossing means seeing the level go up. The first sighting only records the level, except
+// A window is identified by provider, label and reset time. Providers report the same reset with some
+// jitter, so two resets up to RESET_TOLERANCE_MINUTES apart are the same window (an absolute tolerance:
+// rounding to the minute flipped at :30 and re-alerted). Crossing means seeing the level go up. The first sighting only records the level, except
 // that a window already critical when first seen alerts once (otherwise it would never be announced);
 // a first reading at the warning level stays silent so start-up does not raise a burst of warnings.
+const RESET_TOLERANCE_MINUTES = 5
+
+function sameReset(a, b) {
+  return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= RESET_TOLERANCE_MINUTES
+}
+
 function evaluateAlerts(payload, previous) {
   const settings = alertSettings(payload)
   const next = { ...(previous || {}) }
@@ -406,13 +413,14 @@ function evaluateAlerts(payload, previous) {
     if (!provider.available || provider.stale || provider.usage_fallback || provider.local) continue
     for (const window of provider.windows || []) {
       if (window.scope === 'model' || !Number.isFinite(window.used_percent)) continue
-      const resetMinute = window.reset_at ? Math.round(Date.parse(window.reset_at) / 60000) : 0
+      // Minutes since the epoch, unrounded (state saved by 1.4.0 held the rounded minute: still comparable).
+      const resetMinute = window.reset_at ? Date.parse(window.reset_at) / 60000 : 0
       const key = `${provider.provider}::${window.label}`
       const level = alertLevel(window.used_percent, settings)
       const before = next[key]
       next[key] = { level, reset: Number.isFinite(resetMinute) ? resetMinute : 0 }
       const announce = before
-        ? level > 0 && (before.reset !== next[key].reset || level > before.level)
+        ? level > 0 && (!sameReset(before.reset, next[key].reset) || level > before.level)
         : level >= 2
       if (announce) {
         alerts.push({
