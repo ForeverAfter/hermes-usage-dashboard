@@ -42,6 +42,12 @@
       "windows": [["5-hour window", 94], ["Current week", 0]],
       "backend": {"state": "exhausted", "window": "week"},
       "chip": {"window": "Current week", "exhausted": true}
+    },
+    {
+      "name": "a session the provider labels 'Session quota' is a session on both sides",
+      "windows": [["Session quota", 50], ["Monthly quota", 0]],
+      "backend": {"state": "ok", "window": "session"},
+      "chip": {"window": "Session quota", "exhausted": false, "label": "AI 50%"}
     }
   ]
 }

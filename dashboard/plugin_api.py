@@ -116,7 +116,7 @@ def _plugin_settings() -> dict[str, Any]:
 def _window_order(window: dict[str, Any]) -> int:
     """0 = session / 5 hours, 1 = week, 2 = month or subscription period, 3 = anything else."""
     label = str(window.get("label") or "").casefold()
-    if "5-hour" in label or "five hour" in label or label in {"session", "current session"}:
+    if "5-hour" in label or "five hour" in label or "session" in label:
         return 0
     if "week" in label:
         return 1

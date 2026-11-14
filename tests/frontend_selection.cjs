@@ -208,7 +208,7 @@ test('the chip drops windows without a percentage before choosing, like availabi
       assert.equal(selected.exhausted, item.chip.exhausted, item.name)
       if (item.backend.state === 'exhausted') assert.equal(selected.exhausted, true, item.name)
       const label = loadPlugin(data, '__auto_session__', 'zai')('UsageStatusLabel()').props.children
-      assert.equal(label, item.chip.exhausted ? 'AI 0.0% · exhausted' : 'AI —', item.name)
+      assert.equal(label, item.chip.label ?? (item.chip.exhausted ? 'AI 0.0% · exhausted' : 'AI —'), item.name)
     }
   }
 })

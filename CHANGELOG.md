@@ -15,7 +15,8 @@ Fixes from the 1.4.0 review and its follow-up audit. No change to the `availabil
   (the one that blocks longest), otherwise the lowest of session and week; the cap of the model in use still wins
   only when it is stricter. An exhausted window reads `AI 0.0% · exhausted`, so a healthy session no longer hides an
   exhausted week. Windows without a percentage are dropped before choosing, as in the backend, so a session without
-  data no longer hides an exhausted account window that `availability.json` reports.
+  data no longer hides an exhausted account window that `availability.json` reports. The backend now classifies any
+  label containing "session" (for example `Session quota`) as a session window, as the chip already did.
 - `usage_availability` / `/usage-availability`: a file whose `generated_at` is more than 60 seconds in the future
   reads as `unknown`, and a `remaining_percent` that is not `null` or a finite number from 0 to 100 (`1e999`, `NaN`,
   booleans) makes that provider `unknown` instead of failing the whole read. A pathologically nested file
