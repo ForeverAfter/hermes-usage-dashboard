@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from test_backend import (
     ANTHROPIC_URL,
@@ -445,6 +446,50 @@ def test_collect_publishes_availability_and_leaks_no_credential(tmp_path, monkey
     assert providers["zai"]["state"] == "ok"
     assert providers["nous"]["state"] == "ok" and providers["nous"]["window"] == "month"
     assert payload["settings"] == {"alerts_enabled": True, "alert_warn_percent": 80, "alert_critical_percent": 95}
+
+
+KIMI_FAILURES = {
+    "timeout": lambda request: (_ for _ in ()).throw(httpx.ReadTimeout("timed out", request=request)),
+    "transport": lambda request: (_ for _ in ()).throw(httpx.ConnectError("no route", request=request)),
+    "invalid json": lambda request: httpx.Response(200, content=b"<html>not json</html>", request=request),
+}
+
+
+@pytest.mark.parametrize("failure", sorted(KIMI_FAILURES))
+def test_kimi_transport_failure_or_invalid_json_tries_no_other_key_and_spares_the_rest(tmp_path, monkeypatch, failure):
+    """A Kimi timeout, transport error or undecodable body is final: the second key is never sent, the card ends
+    unavailable with the fixed explanation, and every other provider is still collected and published."""
+    backend = load_backend(tmp_path, monkeypatch)
+    calls = []
+    wire_all_providers(monkeypatch, backend, calls)
+    install_secrets(monkeypatch, {"KIMI_CODING_API_KEY": "sk-kimi-first", "KIMI_API_KEY": "sk-kimi-second",
+                                  "GLM_API_KEY": SECRETS["zai"]})
+    kimi_tokens = []
+    other_providers = backend.httpx.Client
+
+    class KimiFailingClient(other_providers):
+        def get(self, url, headers=None, **kwargs):
+            if url == "https://api.kimi.com/coding/v1/usages":
+                kimi_tokens.append((headers or {}).get("Authorization", "").removeprefix("Bearer "))
+                return KIMI_FAILURES[failure](httpx.Request("GET", url))
+            return super().get(url, headers=headers, **kwargs)
+
+    monkeypatch.setattr(backend.httpx, "Client", KimiFailingClient)
+    card = backend._kimi_card()
+    assert kimi_tokens == ["sk-kimi-first"]
+    assert card["available"] is False and card["reason"].startswith("The Kimi API did not respond.")
+    assert "sk-kimi" not in json.dumps(card)
+
+    kimi_tokens.clear()
+    payload = backend._collect()
+    assert kimi_tokens == ["sk-kimi-first"]
+    by_id = {card["provider"]: card for card in payload["providers"]}
+    assert by_id["kimi"]["available"] is False
+    assert all(by_id[name]["available"] for name in ("anthropic", "openai-codex", "zai", "nous"))
+    providers = json.loads((tmp_path / "plugin-data" / "availability.json").read_text(encoding="utf-8"))["providers"]
+    assert providers["kimi-coding"]["state"] == "unknown"
+    assert providers["anthropic"]["state"] == "ok" and providers["zai"]["state"] == "ok"
+    assert providers["openai-codex"]["state"] == "exhausted" and providers["nous"]["state"] == "ok"
 
 
 def test_every_published_state_is_unknown_when_nothing_could_be_read(tmp_path, monkeypatch):
