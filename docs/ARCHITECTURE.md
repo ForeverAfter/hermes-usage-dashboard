@@ -25,7 +25,9 @@ flowchart LR
 - Maps the runtime to a supported usage provider.
 - Calls only its scoped backend through `ctx.rest('/usage')`.
 - Keys every cache entry, query and alert memory by profile and connection, and drops a response that
-  arrives after the active profile or route changed (`gatewayActivationEpoch`).
+  arrives after the active profile or route changed (`gatewayActivationEpoch`). When two sources expose the same
+  profile name nothing is persisted, and the in-memory alert state is also keyed by that epoch, so one source's
+  alert levels never carry over to the other.
 - Keeps manual status-bar selection in plugin-local storage.
 - Merges a temporarily unavailable provider with its last valid card and marks it stale.
 - Shows a toast and a native notification when a window crosses the configured thresholds.

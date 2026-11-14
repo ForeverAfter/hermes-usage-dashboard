@@ -453,15 +453,21 @@ function showAlerts(alerts) {
 }
 
 function runAlerts(payload, scope) {
+  // Without persistence two sources share the profile name, so the in-memory key carries the epoch:
+  // one source's levels never decide another's alerts. Entries from earlier epochs are dropped.
+  const memoryKey = `${scope.key}|${scope.epoch}`
   const persisted = scope.persist
     ? pluginCtx.storage.get(storageKey(ALERT_STATE_KEY, scope), null)
-    : memoryAlertState.get(scope.key)
+    : memoryAlertState.get(memoryKey)
   const { alerts, state } = evaluateAlerts(payload, persisted || {})
   if (scope.persist) {
     rememberScope(scope)
     pluginCtx.storage.set(storageKey(ALERT_STATE_KEY, scope), state)
   } else {
-    memoryAlertState.set(scope.key, state)
+    for (const key of [...memoryAlertState.keys()]) {
+      if (key.startsWith(`${scope.key}|`) && key !== memoryKey) memoryAlertState.delete(key)
+    }
+    memoryAlertState.set(memoryKey, state)
   }
   showAlerts(alerts)
 }

@@ -470,6 +470,29 @@ test('crossing a threshold shows an in-app toast and a native notification, reme
   assert.ok(env.store.has('alert-state-v1:B|'))
 })
 
+// U7: two sources expose the same profile name (local + SSH), so nothing is persisted and the alert memory
+// lives in memory. Switching source bumps the activation epoch; the other source's levels must not leak.
+test('in-memory alert state of two homonymous sources is kept apart by the epoch', async () => {
+  const routes = [{ profile: 'main', connectionId: 'local-1' }, { profile: 'main', connectionId: 'ssh-9' }]
+  const env = makeEnv({ profile: 'main', routes, epoch: 1 })
+  env.run('plugin.register(ctx)')
+  env.restImpl = async () => payloadFor([used('Session', 50)])
+  await env.run('fetchUsage()') // source A: 50 %
+  env.epoch = 2 // the user switches to source B, another account
+  env.restImpl = async () => payloadFor([used('Session', 85)])
+  await env.run('fetchUsage()')
+  assert.equal(env.osNotifications.length, 0) // B was first seen at 85 %: no crossing happened on B
+  env.restImpl = async () => payloadFor([used('Session', 96)])
+  await env.run('fetchUsage()') // B goes critical
+  assert.equal(env.osNotifications.length, 1)
+  env.epoch = 3 // back to A, already critical on its own: A must still be told once
+  env.restImpl = async () => payloadFor([used('Session', 97)])
+  await env.run('fetchUsage()')
+  assert.equal(env.osNotifications.length, 2)
+  assert.equal(env.run('memoryAlertState.size'), 1) // entries of earlier epochs are dropped
+  assert.deepEqual([...env.store.keys()].filter(key => key.includes('alert')), []) // still nothing persisted
+})
+
 test('notifications carry only the provider, window, percentage and reset time', async () => {
   const env = makeEnv()
   env.run('plugin.register(ctx)')
