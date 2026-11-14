@@ -18,6 +18,12 @@ Automatic mode follows the provider and model reported by the active Hermes sess
 
 If the active provider does not expose a percentage, the status bar shows `AI —`. It never substitutes another provider silently.
 
+Within a provider, the chip uses the same rule as `availability.json`: an exhausted window (1 % left or less) comes
+first, and if several are exhausted, the one that blocks longest; otherwise the lower of the session (5 h) and weekly
+windows. An exhausted window reads `AI 0% · exhausted`, so a healthy session never hides an exhausted week. A
+session or weekly window without a percentage shows `AI —` unless another window is exhausted. The Opus / Sonnet
+weekly cap of the model the session is running replaces that window only when it is stricter.
+
 ### Pinned
 
 Click any percentage in the popover to pin that provider and window. The choice persists locally. Click **Follow session** to return to automatic mode.

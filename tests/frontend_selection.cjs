@@ -88,15 +88,22 @@ test('missing session percentage stays selected and renders no data, never zero 
     }
   }
   const data = { providers: [provider('anthropic', [window('Session', 0), window('Weekly', 92)])] }
-  assert.equal(loadPlugin(data)('UsageStatusLabel()').props.children, 'AI 0.0%')
+  assert.equal(loadPlugin(data)('UsageStatusLabel()').props.children, 'AI 0.0% · exhausted')
+  // An exhausted window still wins over a session without a percentage.
+  const blocked = { providers: [provider('anthropic', [window('Weekly', 0), window('5-hour window', null)])] }
+  assert.equal(select(blocked).selected.window, 'Weekly')
 })
 
 test('weekly then monthly fallback recognizes EN and ES labels', () => {
   for (const weekly of ['Weekly', 'week', 'semana']) {
     for (const monthly of ['Monthly', 'month', 'mensual', 'Subscription period']) {
+      // A recognized weekly window is a primary window, so an exhausted month does not decide the chip.
       const data = { providers: [provider('anthropic', [window(monthly, 1), window(weekly, 95)])] }
       assert.equal(select(data).selected.window, weekly)
-      data.providers[0].windows = [window('Other quota', 0), window(monthly, 95)]
+      // Without session or week, a recognized month wins ties over an unrecognized quota.
+      data.providers[0].windows = [window('Other quota', 50), window(monthly, 50)]
+      assert.equal(select(data).selected.window, monthly)
+      data.providers[0].windows = [window('Other quota', 0), window(monthly, 0)]
       assert.equal(select(data).selected.window, monthly)
     }
   }
@@ -107,20 +114,22 @@ test('active provider isolation, unsupported provider, empty data and stable tie
     provider('openai-codex', [window('Session', 1)]),
     provider('anthropic', [window('Session', 94), window('Current session', 2), window('Weekly', 0)])
   ] }
-  assert.equal(select(data).selected.value, 'anthropic::Session')
+  assert.equal(select(data).selected.value, 'anthropic::Weekly') // the exhausted week, not a healthy session
   assert.equal(select(data, '__auto_session__', 'openai-codex').selected.remaining, 1)
   assert.equal(select(data, '__auto_session__', 'unsupported').selected, null)
   assert.equal(select(data, 'missing::Weekly', 'unsupported').selected, null)
-  assert.equal(select(data, 'missing::Weekly').selected.value, 'anthropic::Session')
+  assert.equal(select(data, 'missing::Weekly').selected.value, 'anthropic::Weekly')
   assert.equal(select(data, 'missing::Weekly').fellBack, true)
   assert.equal(select(undefined).selected, null)
   assert.equal(select({ providers: [] }).selected, null)
-  assert.equal(select(data, 'anthropic::Weekly', 'unsupported').selected.value, 'anthropic::Session')
+  assert.equal(select(data, 'anthropic::Weekly', 'unsupported').selected.value, 'anthropic::Weekly')
+  data.providers[1].windows = [window('Session', 94), window('Current session', 94), window('Weekly', 97)]
+  assert.equal(select(data).selected.value, 'anthropic::Session') // equal remaining: the first one is kept
 })
 
 test('saved and clicked weekly pin the provider, not its period', () => {
   const data = { providers: [
-    provider('anthropic', [window('Weekly', 92), window('Session', 94)]),
+    provider('anthropic', [window('Weekly', 95), window('Session', 94)]),
     provider('openai-codex', [window('Session', 12)])
   ] }
   for (const saved of ['anthropic::Weekly', 'anthropic::Old label']) {
@@ -133,22 +142,71 @@ test('saved and clicked weekly pin the provider, not its period', () => {
   button.props.onClick({preventDefault() {}, stopPropagation() {}})
   assert.equal(run('UsageStatusLabel()').props.children, 'AI 94%')
   const panel = nodes(run('UsageCompactPanel()'))
-  assert.ok(panel.some(node => /session.*week.*month/i.test(node.props?.children)))
+  assert.ok(panel.some(node => /provider.*exhausted.*session.*week/i.test(node.props?.children)))
 })
 
-test('automatic chooses session before weekly regardless of remaining or input order', () => {
+// U2: the chip follows the backend's availability policy. An exhausted window first (the one that blocks
+// longest); otherwise the lowest remaining of session and week, regardless of input order.
+test('automatic shows the lowest of session and week, and an exhausted week over a healthy session', () => {
   for (const label of ['Session', 'Current session', '5-hour window', '5 horas', 'sesión']) {
-    for (const [session, weekly] of [[94, 92], [92, 94]]) {
+    for (const [session, weekly, expected] of [[94, 92, 'Weekly'], [92, 94, label], [94, 0, 'Weekly'], [0, 94, label]]) {
       for (const windows of [[window('Weekly', weekly), window(label, session)], [window(label, session), window('Weekly', weekly)]]) {
         const data = { providers: [provider('anthropic', windows)] }
         const before = JSON.stringify(data)
         const selected = select(data).selected
-        assert.equal(selected.window, label)
-        assert.equal(selected.remaining, session)
+        assert.equal(selected.window, expected)
+        assert.equal(selected.remaining, Math.min(session, weekly))
+        assert.equal(selected.exhausted, Math.min(session, weekly) <= 1)
         assert.equal(JSON.stringify(data), before)
       }
     }
   }
+})
+
+test('a healthy session never hides an exhausted week in the chip', () => {
+  const data = { providers: [provider('anthropic', [window('Current session', 94), window('Current week', 0)])] }
+  for (const saved of ['__auto_session__', 'anthropic::Current session']) {
+    const label = loadPlugin(data, saved)('UsageStatusLabel()')
+    assert.equal(label.props.children, 'AI 0.0% · exhausted')
+    assert.match(label.props.title, /Current week/)
+    assert.match(label.props.title, /exhausted/)
+  }
+  // 1 % or less counts as exhausted, exactly like availability.json.
+  data.providers[0].windows[1].remaining_percent = 1
+  assert.equal(select(data).selected.exhausted, true)
+  data.providers[0].windows[1].remaining_percent = 1.5
+  assert.equal(select(data).selected.exhausted, false)
+  assert.equal(loadPlugin(data)('UsageStatusLabel()').props.children, 'AI 1.5%')
+})
+
+test('with several exhausted windows the chip shows the one that blocks longest', () => {
+  const soon = '2026-11-06T15:00:00Z'
+  const later = '2026-11-10T00:00:00Z'
+  const pick = windows => select({ providers: [provider('anthropic', windows)] }).selected.window
+  assert.equal(pick([window('Session', 0, { reset_at: soon }), window('Weekly', 0, { reset_at: later })]), 'Weekly')
+  assert.equal(pick([window('Session', 0, { reset_at: later }), window('Weekly', 1, { reset_at: soon })]), 'Session')
+  // An unknown reset blocks for an unknown time, so it outranks a known one.
+  assert.equal(pick([window('Session', 0, { reset_at: soon }), window('Weekly', 0)]), 'Weekly')
+  assert.equal(pick([window('Session', 0), window('Weekly', 0, { reset_at: later })]), 'Session')
+  // Same reset: the session (the backend's tie-break).
+  assert.equal(pick([window('Weekly', 0, { reset_at: soon }), window('Session', 0, { reset_at: soon })]), 'Session')
+  // A monthly bucket does not decide while session or week exist (same as availability.json).
+  assert.equal(pick([window('Session', 50), window('Monthly MCP quota', 0)]), 'Session')
+})
+
+test('the cap of the model in use still wins when it is tighter than the session', () => {
+  const data = { providers: [provider('anthropic', [
+    window('Current session', 50, { scope: 'account' }),
+    window('Current week', 60, { scope: 'account' }),
+    window('Opus week', 0, { scope: 'model' })
+  ])] }
+  const run = loadPlugin(data)
+  const chosen = model => run(`selectedStatus(input.data, '__auto_session__', {usageProvider: 'anthropic', model: '${model}'}).selected`)
+  assert.equal(chosen('claude-opus-5-5').window, 'Opus week')
+  assert.equal(chosen('claude-opus-5-5').exhausted, true)
+  assert.equal(chosen('claude-sonnet-5-5').window, 'Current session')
+  data.providers[0].windows[1].remaining_percent = 0 // account week exhausted too: the cap is not stricter
+  assert.equal(chosen('claude-opus-5-5').window, 'Current week')
 })
 
 // --- A7: per-model windows -------------------------------------------------------------------

@@ -30,6 +30,8 @@ flowchart LR
 - Merges a temporarily unavailable provider with its last valid card and marks it stale.
 - Shows a toast and a native notification when a window crosses the configured thresholds.
 - Keeps model-capped windows (Opus / Sonnet weekly) out of the status bar unless the session runs that model.
+- Picks the chip's window with the same policy as `availability.json` (exhausted first, the one that blocks longest;
+  otherwise the lowest of session and week) and marks an exhausted window in the chip.
 
 ## Python backend
 

@@ -94,7 +94,8 @@ function selectableWindows(data) {
         provider: provider.label,
         window: window.label,
         scope: window.scope === 'model' ? 'model' : 'account',
-        remaining: window.remaining_percent == null ? null : clamp(window.remaining_percent)
+        remaining: window.remaining_percent == null ? null : clamp(window.remaining_percent),
+        reset_at: typeof window.reset_at === 'string' ? window.reset_at : null
       }))
   )
 }
@@ -156,25 +157,64 @@ function windowPriority(label) {
   return 3
 }
 
+// Same threshold as the backend's availability.json: 1 % remaining or less is exhausted.
+const EXHAUSTED_AT_OR_BELOW = 1
+
+function isExhausted(option) {
+  return option?.remaining != null && option.remaining <= EXHAUSTED_AT_OR_BELOW
+}
+
+function resetTime(option) {
+  const time = option.reset_at ? Date.parse(option.reset_at) : NaN
+  return Number.isFinite(time) ? time : null
+}
+
+// Of two exhausted windows, the one that blocks longer: an unknown reset outranks a known one, a later
+// reset an earlier one, and on a tie the session wins (as in the backend's availability.json).
+function blocksLonger(option, current) {
+  const a = resetTime(option)
+  const b = resetTime(current)
+  if ((a == null) !== (b == null)) return a == null
+  if (a != null && a !== b) return a > b
+  return windowPriority(option.window) < windowPriority(current.window)
+}
+
+// The window that speaks for a provider. It mirrors the backend's availability policy so the chip
+// never contradicts availability.json: the primary windows are session and week (any account window
+// when the provider has neither); an exhausted one comes first, the one that blocks longest; otherwise
+// the lowest remaining, earlier input order on ties. A primary window without a percentage keeps the
+// chip at "no data" rather than letting another window speak for it. The cap of the model in use
+// (Opus / Sonnet week) wins only when it is stricter.
 function priorityOption(options) {
-  return options.reduce((preferred, option) => {
-    if (!preferred) return option
-    const rank = windowPriority(option.window)
-    const preferredRank = windowPriority(preferred.window)
-    if (rank < preferredRank) return option
-    // Ties keep their order, except that the cap of the model in use wins when it is the tighter one.
-    if (
-      rank === preferredRank &&
-      option.scope === 'model' &&
-      preferred.scope !== 'model' &&
-      option.remaining != null &&
-      preferred.remaining != null &&
-      option.remaining < preferred.remaining
-    ) {
-      return option
-    }
-    return preferred
-  }, null)
+  const account = options.filter(option => option.scope !== 'model')
+  const caps = options.filter(option => option.scope === 'model')
+  const sessionOrWeek = account.filter(option => windowPriority(option.window) <= 1)
+  const primary = sessionOrWeek.length ? sessionOrWeek : account
+  const known = primary.filter(option => option.remaining != null)
+  const exhausted = known.filter(isExhausted)
+  let chosen = null
+  if (exhausted.length) {
+    chosen = exhausted.reduce((current, option) => (blocksLonger(option, current) ? option : current))
+  } else if (known.length < primary.length) {
+    chosen = primary
+      .filter(option => option.remaining == null)
+      .reduce((current, option) =>
+        windowPriority(option.window) < windowPriority(current.window) ? option : current)
+  } else if (known.length) {
+    chosen = known.reduce((current, option) => {
+      if (option.remaining !== current.remaining) return option.remaining < current.remaining ? option : current
+      return windowPriority(option.window) < windowPriority(current.window) ? option : current
+    })
+  }
+  const cap = caps
+    .filter(option => option.remaining != null)
+    .reduce((current, option) => (!current || option.remaining < current.remaining ? option : current), null)
+  if (cap) {
+    if (!chosen) chosen = cap
+    else if (chosen.remaining == null ? isExhausted(cap) : cap.remaining < chosen.remaining) chosen = cap
+  }
+  if (!chosen && caps.length) chosen = caps[0]
+  return chosen ? { ...chosen, exhausted: isExhausted(chosen) } : null
 }
 
 function selectedStatus(data, selection, runtime) {
@@ -504,7 +544,7 @@ function CompactWindow({ provider, window, selectedValue }) {
                 ),
                 type: 'button',
                 'aria-pressed': selected,
-                title: 'Pin this provider to the status bar (session / 5 hours, then weekly, then monthly)',
+                title: 'Pin this provider to the status bar (it shows an exhausted window first, otherwise the lower of session and weekly)',
                 onClick: chooseForStatus,
                 children: `${selected ? '● ' : ''}${formatPercent(window.remaining_percent)} remaining`
               })
@@ -699,7 +739,7 @@ function UsageCompactPanel() {
               title: runtime.model || undefined,
               children: selection === AUTO_SELECTION
                 ? `Current model: ${runtime.model || 'unknown'}`
-                : 'Click any percentage to pin its provider: session / 5 hours, then weekly, then monthly.'
+                : 'Click any percentage to pin its provider: exhausted window first, otherwise the lower of session and weekly.'
             })
           ]
         })
@@ -746,11 +786,16 @@ function UsageStatusLabel() {
   const runtime = useActiveRuntime()
   const { selected, fellBack } = selectedStatus(query.data, selection, runtime)
   const runtimeLabel = runtime.provider || runtime.model || 'unidentified provider'
+  const reset = selected?.exhausted ? formatDate(selected.reset_at) : null
+  const exhaustedNote = selected?.exhausted ? ` · exhausted${reset ? ` until ${reset}` : ''}` : ''
   return jsx('span', {
     title: selected
-      ? `${selection === AUTO_SELECTION ? 'Automatic' : 'Pinned provider'} · ${runtimeLabel} · ${selected.provider} · ${selected.window}${fellBack ? ' · previous selection unavailable' : ''}`
+      ? `${selection === AUTO_SELECTION ? 'Automatic' : 'Pinned provider'} · ${runtimeLabel} · ${selected.provider} · ${selected.window}${exhaustedNote}${fellBack ? ' · previous selection unavailable' : ''}`
       : `Automatic · ${runtimeLabel} · no linked quota`,
-    children: selected?.remaining != null ? `AI ${formatPercent(selected.remaining)}` : 'AI —'
+    'data-exhausted': selected?.exhausted ? 'true' : undefined,
+    children: selected?.remaining != null
+      ? `AI ${formatPercent(selected.remaining)}${selected.exhausted ? ' · exhausted' : ''}`
+      : 'AI —'
   })
 }
 
