@@ -1,0 +1,47 @@
+{
+  "description": "Same windows through the backend's availability entry and the chip's priorityOption. Whenever availability.json publishes exhausted, the chip shows that same window as exhausted. Labels are ones both sides classify the same way.",
+  "cases": [
+    {
+      "name": "session without percentage and an exhausted monthly quota",
+      "windows": [["5-hour window", null], ["Monthly MCP quota", 0]],
+      "backend": {"state": "exhausted", "window": "month"},
+      "chip": {"window": "Monthly MCP quota", "exhausted": true}
+    },
+    {
+      "name": "every primary without percentage and an exhausted monthly quota",
+      "windows": [["5-hour window", null], ["Current week", null], ["Monthly MCP quota", 0]],
+      "backend": {"state": "exhausted", "window": "month"},
+      "chip": {"window": "Monthly MCP quota", "exhausted": true}
+    },
+    {
+      "name": "every primary without percentage and a healthy monthly quota",
+      "windows": [["5-hour window", null], ["Current week", null], ["Monthly MCP quota", 50]],
+      "backend": {"state": "ok", "window": "month"},
+      "chip": {"window": "5-hour window", "exhausted": false}
+    },
+    {
+      "name": "no window with a percentage at all",
+      "windows": [["5-hour window", null], ["Current week", null]],
+      "backend": {"state": "unknown", "window": null},
+      "chip": {"window": "5-hour window", "exhausted": false}
+    },
+    {
+      "name": "session without percentage and an exhausted week",
+      "windows": [["5-hour window", null], ["Current week", 0], ["Monthly MCP quota", 50]],
+      "backend": {"state": "exhausted", "window": "week"},
+      "chip": {"window": "Current week", "exhausted": true}
+    },
+    {
+      "name": "a known week keeps the monthly quota out of the decision",
+      "windows": [["5-hour window", null], ["Current week", 92], ["Monthly MCP quota", 0]],
+      "backend": {"state": "ok", "window": "week"},
+      "chip": {"window": "5-hour window", "exhausted": false}
+    },
+    {
+      "name": "healthy session and exhausted week",
+      "windows": [["5-hour window", 94], ["Current week", 0]],
+      "backend": {"state": "exhausted", "window": "week"},
+      "chip": {"window": "Current week", "exhausted": true}
+    }
+  ]
+}

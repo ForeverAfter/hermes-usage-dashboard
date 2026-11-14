@@ -94,6 +94,21 @@ def test_providers_without_session_or_week_windows_use_what_they_have(tmp_path, 
     assert mcp_does_not_hide_the_session["state"] == "ok"
 
 
+def test_backend_and_chip_share_the_parity_fixture(tmp_path, monkeypatch):
+    """N1: tests/frontend_selection.cjs runs the same windows through the chip's priorityOption."""
+    backend = load_backend(tmp_path, monkeypatch)
+    parity = json.loads((ROOT / "tests" / "fixtures" / "availability_parity.json").read_text(encoding="utf-8"))
+    assert len(parity["cases"]) >= 7
+    for case in parity["cases"]:
+        for windows in (case["windows"], list(reversed(case["windows"]))):
+            account_windows = [(label, remaining, None, "account") for label, remaining in windows]
+            result = entry(backend, *account_windows, provider="zai")
+            expected = (case["backend"]["state"], case["backend"]["window"])
+            assert (result["state"], result["window"]) == expected, case["name"]
+            if result["state"] == "exhausted":
+                assert case["chip"]["exhausted"] is True, case["name"]
+
+
 def test_unknown_when_missing_old_stale_or_unavailable(tmp_path, monkeypatch):
     backend = load_backend(tmp_path, monkeypatch)
     expected = {"state": "unknown", "remaining_percent": None, "window": None, "reset_at": None, "stale": True}

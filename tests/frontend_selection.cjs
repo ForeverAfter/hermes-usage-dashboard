@@ -194,6 +194,25 @@ test('with several exhausted windows the chip shows the one that blocks longest'
   assert.equal(pick([window('Session', 50), window('Monthly MCP quota', 0)]), 'Session')
 })
 
+// N1: cross test with the backend. tests/test_availability.py runs the same fixture through
+// _availability_entry; whenever availability.json says exhausted, the chip shows that window exhausted.
+test('the chip drops windows without a percentage before choosing, like availability.json', () => {
+  const parity = JSON.parse(readFileSync(path.join(__dirname, 'fixtures', 'availability_parity.json'), 'utf8'))
+  assert.ok(parity.cases.length >= 7)
+  for (const item of parity.cases) {
+    for (const windows of [item.windows, [...item.windows].reverse()]) {
+      const data = { providers: [provider('zai', windows.map(([label, remaining]) => window(label, remaining)))] }
+      const selected = loadPlugin(data, '__auto_session__', 'zai')(
+        'selectedStatus(input.data, input.saved, {usageProvider: \'zai\'})').selected
+      assert.equal(selected.window, item.chip.window, item.name)
+      assert.equal(selected.exhausted, item.chip.exhausted, item.name)
+      if (item.backend.state === 'exhausted') assert.equal(selected.exhausted, true, item.name)
+      const label = loadPlugin(data, '__auto_session__', 'zai')('UsageStatusLabel()').props.children
+      assert.equal(label, item.chip.exhausted ? 'AI 0.0% · exhausted' : 'AI —', item.name)
+    }
+  }
+})
+
 test('the cap of the model in use still wins when it is tighter than the session', () => {
   const data = { providers: [provider('anthropic', [
     window('Current session', 50, { scope: 'account' }),

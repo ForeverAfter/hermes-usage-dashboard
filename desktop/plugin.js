@@ -179,29 +179,31 @@ function blocksLonger(option, current) {
   return windowPriority(option.window) < windowPriority(current.window)
 }
 
-// The window that speaks for a provider. It mirrors the backend's availability policy so the chip
-// never contradicts availability.json: the primary windows are session and week (any account window
-// when the provider has neither); an exhausted one comes first, the one that blocks longest; otherwise
-// the lowest remaining, earlier input order on ties. A primary window without a percentage keeps the
-// chip at "no data" rather than letting another window speak for it. The cap of the model in use
-// (Opus / Sonnet week) wins only when it is stricter.
+// The window that speaks for a provider. It mirrors the backend's availability policy, in the same
+// order of operations, so the chip never hides what availability.json publishes: windows without a
+// percentage are dropped FIRST; of the rest, the primary ones are session and week (any account window
+// when neither has a percentage); an exhausted one comes first, the one that blocks longest; otherwise
+// the lowest remaining, earlier input order on ties. Only when nothing known is exhausted does a
+// session or week without a percentage keep the chip at "no data" rather than letting another window
+// speak for it (a conservative difference: availability.json reports the known windows instead). The
+// cap of the model in use (Opus / Sonnet week) wins only when it is stricter.
 function priorityOption(options) {
   const account = options.filter(option => option.scope !== 'model')
   const caps = options.filter(option => option.scope === 'model')
+  const known = account.filter(option => option.remaining != null)
+  const knownSessionOrWeek = known.filter(option => windowPriority(option.window) <= 1)
+  const primary = knownSessionOrWeek.length ? knownSessionOrWeek : known
+  const exhausted = primary.filter(isExhausted)
   const sessionOrWeek = account.filter(option => windowPriority(option.window) <= 1)
-  const primary = sessionOrWeek.length ? sessionOrWeek : account
-  const known = primary.filter(option => option.remaining != null)
-  const exhausted = known.filter(isExhausted)
+  const missing = (sessionOrWeek.length ? sessionOrWeek : account).filter(option => option.remaining == null)
   let chosen = null
   if (exhausted.length) {
     chosen = exhausted.reduce((current, option) => (blocksLonger(option, current) ? option : current))
-  } else if (known.length < primary.length) {
-    chosen = primary
-      .filter(option => option.remaining == null)
-      .reduce((current, option) =>
-        windowPriority(option.window) < windowPriority(current.window) ? option : current)
-  } else if (known.length) {
-    chosen = known.reduce((current, option) => {
+  } else if (missing.length) {
+    chosen = missing.reduce((current, option) =>
+      windowPriority(option.window) < windowPriority(current.window) ? option : current)
+  } else if (primary.length) {
+    chosen = primary.reduce((current, option) => {
       if (option.remaining !== current.remaining) return option.remaining < current.remaining ? option : current
       return windowPriority(option.window) < windowPriority(current.window) ? option : current
     })
