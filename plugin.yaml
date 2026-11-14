@@ -14,10 +14,10 @@ provides_tools:
 # They are the keys Hermes already uses for those providers; none is required.
 optional_env:
   - name: KIMI_API_KEY
-    description: "Kimi Coding key (shows Kimi quota; sent only to api.kimi.com)"
+    description: "Kimi key (shows Kimi quota; sent only to api.kimi.com; tried after KIMI_CODING_API_KEY)"
     secret: true
   - name: KIMI_CODING_API_KEY
-    description: "Alternative name for the Kimi Coding key"
+    description: "Kimi Coding key, tried first (shows Kimi quota; sent only to api.kimi.com)"
     secret: true
   - name: GLM_API_KEY
     description: "Z.ai key (shows Z.ai quota; sent only to api.z.ai)"

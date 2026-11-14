@@ -27,8 +27,10 @@ Provider usage APIs are not standardized and may change without notice.
 
 ## Kimi / Moonshot
 
-- Prefers the Kimi Coding usage endpoint, with the key Hermes already has (`KIMI_API_KEY` or `KIMI_CODING_API_KEY`),
-  read through the profile's secret scope.
+- Prefers the Kimi Coding usage endpoint, with the key Hermes already has, read through the profile's secret scope.
+  `KIMI_CODING_API_KEY` is tried first and a Kimi Code key (`sk-kimi-…`) before any other; the next declared key
+  (`KIMI_API_KEY`) is tried only when Kimi rejects the previous one as unauthorized (HTTP 401/403). A Moonshot
+  platform key in `KIMI_API_KEY` therefore no longer hides a valid Kimi Coding key. Keys are never logged or returned.
 - Reading Kimi Desktop's local log is **off by default**. When the `kimi_desktop_log_fallback` setting is on and the
   API is unavailable, the plugin parses up to 2 MB of that log. The data is marked `LOCAL` and becomes stale after 24 hours.
 - The log belongs to the operating-system user, not an independently scoped account. Do not assume complete

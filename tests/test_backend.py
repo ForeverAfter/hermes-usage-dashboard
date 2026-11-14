@@ -427,6 +427,92 @@ def test_zai_and_kimi_keys_come_from_the_secret_scope_only(tmp_path, monkeypatch
     assert sent["https://api.kimi.com/coding/v1/usages"] == "Bearer kimi-scoped-key"
 
 
+def kimi_http(monkeypatch, backend, outcomes, calls):
+    """Fake the Kimi usage endpoint per key: ``outcomes`` maps a key to a payload or an HTTP status."""
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, url, headers=None, **kwargs):
+            token = (headers or {}).get("Authorization", "").removeprefix("Bearer ")
+            calls.append(token)
+            outcome = outcomes.get(token, 401)
+            if isinstance(outcome, int):
+                return FakeResponse(status=outcome, url=url)
+            return FakeResponse(outcome, url=url)
+
+    monkeypatch.setattr(backend.httpx, "Client", FakeClient)
+
+
+KIMI_USAGE = {"usage": {"limit": 100, "used": 40}}
+
+
+def test_kimi_coding_key_is_preferred_over_a_generic_kimi_key(tmp_path, monkeypatch):
+    backend = load_backend(tmp_path, monkeypatch)
+    calls = []
+    install_secrets(monkeypatch, {"KIMI_API_KEY": "moonshot-platform-key", "KIMI_CODING_API_KEY": "sk-kimi-coding"})
+    kimi_http(monkeypatch, backend, {"moonshot-platform-key": 401, "sk-kimi-coding": KIMI_USAGE}, calls)
+    card = backend._kimi_card()
+    assert card["available"] is True and card["source"] == "kimi-coding-usage-api"
+    assert card["windows"][0]["remaining_percent"] == 60.0
+    assert calls == ["sk-kimi-coding"]
+
+
+def test_kimi_tries_the_next_declared_key_only_after_an_auth_rejection(tmp_path, monkeypatch):
+    for status in (401, 403):
+        backend = load_backend(tmp_path, monkeypatch)
+        calls = []
+        install_secrets(monkeypatch, {"KIMI_CODING_API_KEY": "sk-kimi-revoked", "KIMI_API_KEY": "sk-kimi-valid"})
+        kimi_http(monkeypatch, backend, {"sk-kimi-revoked": status, "sk-kimi-valid": KIMI_USAGE}, calls)
+        card = backend._kimi_card()
+        assert card["available"] is True
+        assert calls == ["sk-kimi-revoked", "sk-kimi-valid"]
+        text = json.dumps(card)
+        assert "sk-kimi-revoked" not in text and "sk-kimi-valid" not in text
+    # A key with the Kimi Code shape is tried first; the generic one only after it is rejected.
+    backend = load_backend(tmp_path, monkeypatch)
+    calls = []
+    install_secrets(monkeypatch, {"KIMI_CODING_API_KEY": "generic-under-coding-name", "KIMI_API_KEY": "sk-kimi-x"})
+    kimi_http(monkeypatch, backend, {"sk-kimi-x": 401, "generic-under-coding-name": KIMI_USAGE}, calls)
+    assert backend._kimi_card()["available"] is True
+    assert calls == ["sk-kimi-x", "generic-under-coding-name"]
+
+
+def test_kimi_does_not_try_other_keys_on_non_auth_failures(tmp_path, monkeypatch):
+    for status in (429, 500, 503):
+        backend = load_backend(tmp_path, monkeypatch)
+        calls = []
+        install_secrets(monkeypatch, {"KIMI_CODING_API_KEY": "sk-kimi-a", "KIMI_API_KEY": "sk-kimi-b"})
+        kimi_http(monkeypatch, backend, {"sk-kimi-a": status, "sk-kimi-b": KIMI_USAGE}, calls)
+        card = backend._kimi_card()
+        assert card["available"] is False
+        assert calls == ["sk-kimi-a"]
+        assert f"HTTP {status}" in card["reason"]
+
+
+def test_kimi_rejected_keys_end_unavailable_without_leaking_them(tmp_path, monkeypatch):
+    backend = load_backend(tmp_path, monkeypatch)
+    calls = []
+    install_secrets(monkeypatch, {"KIMI_CODING_API_KEY": "sk-kimi-a", "KIMI_API_KEY": "same-key-twice"})
+    kimi_http(monkeypatch, backend, {}, calls)
+    card = backend._kimi_card()
+    assert card["available"] is False and "HTTP 401" in card["reason"]
+    assert calls == ["sk-kimi-a", "same-key-twice"]
+    assert "sk-kimi-a" not in json.dumps(card) and "same-key-twice" not in json.dumps(card)
+    # The same value under both names is sent once.
+    calls.clear()
+    install_secrets(monkeypatch, {"KIMI_CODING_API_KEY": "dup", "KIMI_API_KEY": " dup "})
+    backend._kimi_card()
+    assert calls == ["dup"]
+
+
 def test_zai_without_a_key_makes_no_request(tmp_path, monkeypatch):
     backend = load_backend(tmp_path, monkeypatch)
     calls = []

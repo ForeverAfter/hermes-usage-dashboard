@@ -19,7 +19,7 @@ hermes plugins install ForeverAfter/hermes-usage-dashboard --enable
 
 Eso es todo: Hermes Desktop carga el chip desde el plugin instalado (si no aparece, ejecuta **Reload desktop plugins** en la paleta de comandos). Requiere Hermes 0.22.5 o superior. Verifica con `hermes plugins doctor usage-dashboard`.
 
-Kimi y Z.ai usan las llaves que Hermes ya tiene (`KIMI_API_KEY`; `GLM_API_KEY` o `ZAI_API_KEY`). Codex, Claude y Nous usan la sesión que ya iniciaste en Hermes (`hermes auth`).
+Kimi y Z.ai usan las llaves que Hermes ya tiene (`KIMI_CODING_API_KEY` o `KIMI_API_KEY`, primero la de Kimi Coding; `GLM_API_KEY` o `ZAI_API_KEY`). Codex, Claude y Nous usan la sesión que ya iniciaste en Hermes (`hermes auth`).
 
 ## Qué lee / qué envía
 

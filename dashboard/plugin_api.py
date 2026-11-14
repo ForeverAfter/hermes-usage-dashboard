@@ -54,7 +54,8 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 # Secrets are read with agent.secret_scope.get_secret (declared as optional_env in plugin.yaml).
-_KIMI_KEY_ENV = ("KIMI_API_KEY", "KIMI_CODING_API_KEY")
+_KIMI_KEY_ENV = ("KIMI_CODING_API_KEY", "KIMI_API_KEY")  # the Kimi Code key first
+_KIMI_CODE_KEY_PREFIX = "sk-kimi-"  # Kimi Code keys; other KIMI_API_KEY values are Moonshot platform keys
 _ZAI_KEY_ENV = ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY")
 
 
@@ -268,13 +269,20 @@ def _is_unscoped_error(exc: BaseException) -> bool:
 
 def _first_secret(names: tuple[str, ...]) -> str:
     """First non-blank value among ``names`` from the active profile's secret scope."""
+    secrets = _declared_secrets(names)
+    return secrets[0] if secrets else ""
+
+
+def _declared_secrets(names: tuple[str, ...]) -> list[str]:
+    """Distinct non-blank values of ``names`` from the active profile's secret scope, in order."""
     from agent.secret_scope import get_secret
 
+    values: list[str] = []
     for name in names:
         value = str(get_secret(name) or "").strip()
-        if value:
-            return value
-    return ""
+        if value and value not in values:
+            values.append(value)
+    return values
 
 
 # --- Anthropic (Claude Code) ------------------------------------------------------------------
@@ -649,19 +657,33 @@ def _kimi_log_card(fallback_reason: Optional[str] = None) -> dict[str, Any]:
         )
 
 
-def _kimi_card() -> dict[str, Any]:
-    """Kimi Code's own usage endpoint, with an opt-in Kimi Desktop log fallback."""
-    try:
-        token = _first_secret(_KIMI_KEY_ENV)
-        if not token:
-            return _kimi_log_card("No Kimi Coding key (KIMI_API_KEY) is available in Hermes.")
-        with httpx.Client(timeout=10.0) as client:
+def _kimi_usage_payload(keys: list[str]) -> Any:
+    """GET the Kimi Code usage endpoint with each key in turn. The next key is tried only when the
+    provider rejects the previous one as unauthorized (401/403); any other failure is final."""
+    with httpx.Client(timeout=10.0) as client:
+        for index, token in enumerate(keys):
             response = client.get(
                 "https://api.kimi.com/coding/v1/usages",
                 headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             )
-            response.raise_for_status()
-        payload = response.json() or {}
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (401, 403) and index + 1 < len(keys):
+                    continue
+                raise
+            return response.json()
+    return None
+
+
+def _kimi_card() -> dict[str, Any]:
+    """Kimi Code's own usage endpoint, with an opt-in Kimi Desktop log fallback."""
+    try:
+        # Keys shaped like a Kimi Code key go first (stable, so KIMI_CODING_API_KEY wins a tie).
+        keys = sorted(_declared_secrets(_KIMI_KEY_ENV), key=lambda key: not key.startswith(_KIMI_CODE_KEY_PREFIX))
+        if not keys:
+            return _kimi_log_card("No Kimi Coding key (KIMI_CODING_API_KEY or KIMI_API_KEY) is available in Hermes.")
+        payload = _kimi_usage_payload(keys) or {}
         windows = []
 
         weekly = payload.get("usage") or {}
