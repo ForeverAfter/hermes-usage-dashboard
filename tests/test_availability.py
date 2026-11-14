@@ -207,6 +207,47 @@ def test_reader_treats_a_future_timestamp_as_unknown(tmp_path, monkeypatch):
         assert write(NOW + skew)["providers"]["anthropic"]["state"] == "exhausted"  # small clock skew is fine
 
 
+def test_reader_degrades_extreme_or_wrongly_typed_numbers_to_unknown(tmp_path, monkeypatch):
+    """U6: a parseable but numerically absurd entry is unknown for that provider and never an exception."""
+    plugin = load_plugin_package(monkeypatch)
+    registered = {}
+
+    class Ctx:
+        def register_tool(self, **kwargs):
+            registered["tool"] = kwargs
+
+        def register_command(self, name, handler, **kwargs):
+            registered["command"] = handler
+
+    plugin.register(Ctx())
+    path = tmp_path / "availability.json"
+    monkeypatch.setattr(plugin.availability, "availability_path", lambda: path)
+    valid = '{"state": "low", "remaining_percent": 9, "window": "week", "reset_at": null, "stale": false}'
+    for bad in ("1e999", "-1e999", "NaN", "Infinity", "true", "false", "-0.5", "100.5", "250", '"50"', "[50]", "{}"):
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        path.write_text(
+            '{"schema": 1, "generated_at": "%s", "providers": {"anthropic": {"state": "ok", '
+            '"remaining_percent": %s, "window": "session", "reset_at": null, "stale": false},'
+            '"zai": %s}}' % (now, bad, valid),
+            encoding="utf-8",
+        )
+        document = plugin.availability.load(path)
+        assert document["providers"]["anthropic"]["state"] == "unknown", bad
+        assert document["providers"]["anthropic"]["remaining_percent"] is None
+        assert document["providers"]["zai"] == {"state": "low", "remaining_percent": 9, "window": "week",
+                                                "reset_at": None, "stale": False}
+        output = json.loads(registered["tool"]["handler"]({}))
+        assert "error" not in output, bad
+        assert "anthropic: unknown" in output["summary"] and "zai: low - 9% left" in output["summary"]
+        assert "zai: low" in registered["command"]("")
+    for edge, expected in (("0", 0), ("100", 100), ("0.0", 0), ("99.9", 99), ("null", None)):
+        path.write_text(json.dumps({"schema": 1, "generated_at": now, "providers": {
+            "anthropic": {"state": "ok", "remaining_percent": json.loads(edge), "window": "session",
+                          "reset_at": None, "stale": False}}}), encoding="utf-8")
+        entry = plugin.availability.load(path)["providers"]["anthropic"]
+        assert (entry["state"], entry["remaining_percent"]) == ("ok", expected)
+
+
 def test_reader_keeps_only_contract_fields(tmp_path, monkeypatch):
     plugin = load_plugin_package(monkeypatch)
     path = tmp_path / "availability.json"

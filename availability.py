@@ -8,6 +8,7 @@ a minute in the future reads as ``unknown``: availability is an optimization, ne
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -40,20 +41,32 @@ def _unknown() -> dict[str, Any]:
     return {"state": "unknown", "remaining_percent": None, "window": None, "reset_at": None, "stale": True}
 
 
+def _valid_percent(value: Any) -> bool:
+    """``None`` or a finite number in 0-100. Booleans, strings, infinities and NaN are not percentages."""
+    if value is None:
+        return True
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and 0 <= value <= 100
+
+
 def _clean_entry(raw: Any) -> dict[str, Any]:
-    """Keep only the contract's fields, with the contract's types."""
-    if not isinstance(raw, dict) or raw.get("state") not in STATES:
+    """Keep only the contract's fields, with the contract's types. Anything malformed is ``unknown``."""
+    try:
+        if not isinstance(raw, dict) or raw.get("state") not in STATES:
+            return _unknown()
+        remaining = raw.get("remaining_percent")
+        if not _valid_percent(remaining):
+            return _unknown()
+        return {
+            "state": raw["state"],
+            "remaining_percent": None if remaining is None else int(remaining),
+            "window": raw.get("window") if isinstance(raw.get("window"), str) else None,
+            "reset_at": raw.get("reset_at") if isinstance(raw.get("reset_at"), str) else None,
+            "stale": bool(raw.get("stale")),
+        }
+    except Exception:  # a single corrupt entry must never take the whole document down
         return _unknown()
-    remaining = raw.get("remaining_percent")
-    return {
-        "state": raw["state"],
-        "remaining_percent": (
-            int(remaining) if isinstance(remaining, (int, float)) and not isinstance(remaining, bool) else None
-        ),
-        "window": raw.get("window") if isinstance(raw.get("window"), str) else None,
-        "reset_at": raw.get("reset_at") if isinstance(raw.get("reset_at"), str) else None,
-        "stale": bool(raw.get("stale")),
-    }
 
 
 def load(path: Optional[Path] = None, now: Optional[datetime] = None) -> dict[str, Any]:
