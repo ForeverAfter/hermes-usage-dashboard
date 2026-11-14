@@ -127,7 +127,11 @@ Written atomically to `plugin_data_dir("usage-dashboard")/availability.json` on 
 - Frontend polling: 60 seconds, served by backend cache when fresh.
 - Frontend last-good cache: 24 hours, per profile and connection, at most 8 profiles kept.
 - Claude fresh cache: 5 minutes; stale fallback up to 24 hours. Both live in the plugin data directory.
-- A cache is discarded as soon as one of its windows passes its reset time.
+- A window reset invalidates the FRESH caches only: the backend response cache and the Claude fresh cache are
+  discarded as soon as one of their windows passes its reset time. The fallbacks (Claude stale fallback, the
+  frontend last-good cache, both up to 24 hours, and the per-provider fallback, which lasts while that provider
+  stays down in the Desktop session) are not checked against reset times: they can still show the previous window,
+  always marked `STALE` (or "Cached data" for the frontend last-good cache).
 
 ## Trust boundary
 

@@ -8,7 +8,7 @@ See how much of your **Codex, Claude Code, Kimi, Z.ai and Nous** subscriptions i
 <!-- screenshot: docs/images/status-chip.png (status-bar chip "AI 64%" and the open popover) -->
 
 - **Follows your session.** The chip shows the quota of the provider the focused session is actually using, or a provider you pin (one app-wide choice). Opus/Sonnet weekly caps never pose as your account quota.
-- **Never lies when a provider is down.** Stale values are badged `STALE`, local ones `LOCAL`, missing ones `NO DATA`; a cache dies the moment its window resets. Claude's 1 % session is shown as 1 %, not 100 %.
+- **Never lies when a provider is down.** Stale values are badged `STALE`, local ones `LOCAL`, missing ones `NO DATA`. A window reset invalidates the backend's fresh caches; the fallback copies shown while a provider or the backend is down (saved ones for up to 24 hours) can still show the previous window, always marked `STALE` or as cached data. Claude's 1 % session is shown as 1 %, not 100 %.
 - **Agents can ask.** The `usage_availability` tool and the `/usage-availability` command say which subscription still has quota and when an exhausted one comes back. Alerts at 80 % and 95 % used.
 
 ## Install

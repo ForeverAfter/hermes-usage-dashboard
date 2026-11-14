@@ -8,7 +8,7 @@ Mira cuánto te queda de tus suscripciones de **Codex, Claude Code, Kimi, Z.ai y
 <!-- captura: docs/images/status-chip.png (el chip "AI 64%" de la barra de estado y el popover abierto) -->
 
 - **Sigue tu sesión.** El chip muestra la cuota del proveedor que la sesión enfocada está usando de verdad, o un proveedor que fijes (una sola elección para toda la app). Los topes semanales de Opus/Sonnet nunca se hacen pasar por la cuota de tu cuenta.
-- **No miente cuando un proveedor falla.** Un valor viejo lleva la insignia `STALE`, uno local `LOCAL` y uno ausente `NO DATA`; una caché muere en cuanto se reinicia su ventana. La sesión de Claude al 1 % se ve como 1 %, no como 100 %.
+- **No miente cuando un proveedor falla.** Un valor viejo lleva la insignia `STALE`, uno local `LOCAL` y uno ausente `NO DATA`. El reinicio de una ventana invalida las cachés frescas del backend; las copias de respaldo que se muestran mientras un proveedor o el backend fallan (las guardadas, hasta 24 horas) aún pueden mostrar la ventana anterior, siempre marcada `STALE` o como datos en caché. La sesión de Claude al 1 % se ve como 1 %, no como 100 %.
 - **Los agentes pueden preguntar.** La herramienta `usage_availability` y el comando `/usage-availability` dicen qué suscripción aún tiene cuota y cuándo vuelve una agotada. Alertas al 80 % y al 95 % de uso.
 
 ## Instalación

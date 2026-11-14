@@ -108,3 +108,16 @@ def test_alert_texts_describe_last_level_and_once_per_crossing():
     assert "once per crossing" in guide and "re-arms" in guide
     assert "once per activation" in guide
     assert "last alert level observed" in privacy and "once each time it is activated" in privacy
+
+
+def test_cache_texts_only_promise_reset_invalidation_of_fresh_caches():
+    """N4: a reset invalidates the fresh caches; the fallbacks may still show the previous window, marked stale."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_es = (ROOT / "README.es.md").read_text(encoding="utf-8")
+    architecture = (ROOT / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    assert "a cache dies the moment its window resets" not in readme
+    assert "una caché muere en cuanto se reinicia su ventana" not in readme_es
+    assert "A cache is discarded as soon as one of its windows passes its reset time." not in architecture
+    assert "invalidates the backend's fresh caches" in readme and "can still show the previous window" in readme
+    assert "invalida las cachés frescas del backend" in readme_es and "ventana anterior" in readme_es
+    assert "invalidates the FRESH caches only" in architecture and "not checked against reset times" in architecture
