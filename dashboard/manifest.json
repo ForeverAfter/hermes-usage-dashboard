@@ -3,7 +3,7 @@
   "label": "AI Usage",
   "description": "Subscription quota for OpenAI Codex, Claude Code, Kimi, Z.ai and Nous, plus a usage_availability tool",
   "icon": "Graph",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "tab": {
     "path": "/subscription-usage",
     "hidden": true

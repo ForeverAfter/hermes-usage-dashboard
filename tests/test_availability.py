@@ -309,7 +309,9 @@ def test_plugin_yaml_declares_the_tool_and_a_real_floor():
     assert manifest["requires_hermes"].startswith(">=0.22")
     assert manifest["license"] == "MIT"
     assert manifest["homepage"].startswith("https://")
-    assert manifest["version"] == "1.4.0"
+    assert manifest["version"] == "1.4.1"
+    assert json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))["version"] == "1.4.1"
+    assert 'VERSION = "1.4.1"' in (ROOT / "dashboard" / "plugin_api.py").read_text(encoding="utf-8")
     assert {"low_threshold_percent", "alerts_enabled", "alert_warn_percent", "alert_critical_percent",
             "kimi_desktop_log_fallback"} <= set(manifest["config_schema"])
 

@@ -1,5 +1,5 @@
 name: usage-dashboard
-version: 1.4.0
+version: 1.4.1
 manifest_version: 2
 description: "AI Usage: subscription quota for OpenAI Codex, Claude Code, Kimi, Z.ai and Nous in the Hermes Desktop status bar, plus a usage_availability tool that tells agents which subscription still has quota."
 author: "ForeverAfter"

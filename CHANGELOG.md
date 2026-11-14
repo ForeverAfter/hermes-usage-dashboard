@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented here.
 
+## [1.4.1] - 2026-11-14
+
+Fixes from the 1.4.0 review. No change to the `availability.json` contract (schema 1), tool or command names.
+
+### Fixed
+
+- Kimi: `KIMI_CODING_API_KEY` (and any `sk-kimi-` key) is tried before `KIMI_API_KEY`, and the next declared key is
+  tried only when Kimi rejects the previous one with HTTP 401/403. A Moonshot platform key no longer hides a valid
+  Kimi Coding key. Keys are never logged or returned.
+- Status chip: it follows the same policy as `availability.json`. An exhausted session or weekly window comes first
+  (the one that blocks longest), otherwise the lowest of session and week; the cap of the model in use still wins
+  only when it is stricter. An exhausted window reads `AI 0% · exhausted`, so a healthy session no longer hides an
+  exhausted week.
+- `usage_availability` / `/usage-availability`: a file whose `generated_at` is more than 60 seconds in the future
+  reads as `unknown`, and a `remaining_percent` that is not `null` or a finite number from 0 to 100 (`1e999`, `NaN`,
+  booleans) makes that provider `unknown` instead of failing the whole read.
+- Alerts: a window that is already critical the first time it is seen is announced once; reset times up to 5 minutes
+  apart are the same window (no repeat alerts from timestamp jitter); with two sources exposing the same profile
+  name, the in-memory alert state is kept per activation epoch.
+
+### Changed
+
+- Docs: pinning keeps a provider, not a window; the pinned provider is one app-wide preference; model caps can only
+  change the status-bar chip, never the summary, alerts or `availability.json`.
+
 ## [1.4.0] - 2026-11-06
 
 Catalog-admission release. Requires Hermes 0.22.5 or newer.

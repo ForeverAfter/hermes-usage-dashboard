@@ -25,7 +25,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 PLUGIN_NAME = "usage-dashboard"
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 _CACHE_LOCK = threading.Lock()
 _CACHE_TTL_SECONDS = 120.0
