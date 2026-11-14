@@ -4,7 +4,7 @@ All notable changes to this project are documented here.
 
 ## [1.4.1] - 2026-11-14
 
-Fixes from the 1.4.0 review. No change to the `availability.json` contract (schema 1), tool or command names.
+Fixes from the 1.4.0 review and its follow-up audit. No change to the `availability.json` contract (schema 1), tool or command names.
 
 ### Fixed
 
@@ -13,11 +13,13 @@ Fixes from the 1.4.0 review. No change to the `availability.json` contract (sche
   Kimi Coding key. Keys are never logged or returned.
 - Status chip: it follows the same policy as `availability.json`. An exhausted session or weekly window comes first
   (the one that blocks longest), otherwise the lowest of session and week; the cap of the model in use still wins
-  only when it is stricter. An exhausted window reads `AI 0% · exhausted`, so a healthy session no longer hides an
-  exhausted week.
+  only when it is stricter. An exhausted window reads `AI 0.0% · exhausted`, so a healthy session no longer hides an
+  exhausted week. Windows without a percentage are dropped before choosing, as in the backend, so a session without
+  data no longer hides an exhausted account window that `availability.json` reports.
 - `usage_availability` / `/usage-availability`: a file whose `generated_at` is more than 60 seconds in the future
   reads as `unknown`, and a `remaining_percent` that is not `null` or a finite number from 0 to 100 (`1e999`, `NaN`,
-  booleans) makes that provider `unknown` instead of failing the whole read.
+  booleans) makes that provider `unknown` instead of failing the whole read. A pathologically nested file
+  (`RecursionError` while decoding) reads as `unknown` too, in the reader, the tool and the command.
 - Alerts: a window that is already critical the first time it is seen is announced once; reset times up to 5 minutes
   apart are the same window (no repeat alerts from timestamp jitter); with two sources exposing the same profile
   name, the in-memory alert state is kept per activation epoch.
@@ -26,6 +28,15 @@ Fixes from the 1.4.0 review. No change to the `availability.json` contract (sche
 
 - Docs: pinning keeps a provider, not a window; the pinned provider is one app-wide preference; model caps can only
   change the status-bar chip, never the summary, alerts or `availability.json`.
+- Docs: alerts fire once per crossing of the last observed level and re-arm after usage drops; with two sources
+  sharing a profile name a still-critical source is announced again once per activation (behaviour unchanged, now
+  described in the user guide and PRIVACY).
+- Docs: a window reset invalidates the backend's fresh caches; the fallback copies (saved ones up to 24 hours) can
+  still show the previous window, marked `STALE` (behaviour unchanged; README, README.es and ARCHITECTURE corrected).
+
+### Tests
+
+- Kimi: a timeout, a transport error or an invalid JSON body tries no other key and leaves the other providers intact.
 
 ## [1.4.0] - 2026-11-06
 
