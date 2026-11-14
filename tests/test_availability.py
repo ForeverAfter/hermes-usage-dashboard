@@ -182,6 +182,31 @@ def test_reader_treats_missing_corrupt_or_old_data_as_unknown(tmp_path, monkeypa
     assert "older than 15 minutes" in plugin.availability.format_summary(stale, now=NOW)
 
 
+def test_reader_treats_a_future_timestamp_as_unknown(tmp_path, monkeypatch):
+    """U5: a file stamped ahead of the clock (clock corrected later, or a stray writer) must not stay fresh."""
+    plugin = load_plugin_package(monkeypatch)
+    path = tmp_path / "availability.json"
+
+    def write(generated_at):
+        path.write_text(json.dumps({
+            "schema": 1,
+            "generated_at": generated_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "providers": {"anthropic": {"state": "exhausted", "remaining_percent": 0, "window": "week",
+                                        "reset_at": None, "stale": False}},
+        }), encoding="utf-8")
+        return plugin.availability.load(path, now=NOW)
+
+    for ahead in (timedelta(seconds=61), timedelta(minutes=5), timedelta(hours=3)):
+        future = write(NOW + ahead)
+        assert {v["state"] for v in future["providers"].values()} == {"unknown"}
+        assert future["providers"]["anthropic"]["stale"] is True
+        summary = plugin.availability.format_summary(future, now=NOW)
+        assert "EXHAUSTED" not in summary
+        assert "in the future" in summary
+    for skew in (timedelta(seconds=0), timedelta(seconds=30), timedelta(seconds=60)):
+        assert write(NOW + skew)["providers"]["anthropic"]["state"] == "exhausted"  # small clock skew is fine
+
+
 def test_reader_keeps_only_contract_fields(tmp_path, monkeypatch):
     plugin = load_plugin_package(monkeypatch)
     path = tmp_path / "availability.json"

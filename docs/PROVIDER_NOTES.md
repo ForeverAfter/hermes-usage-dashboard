@@ -54,4 +54,5 @@ Provider usage APIs are not standardized and may change without notice.
 ## Availability policy
 
 Missing data is represented as unavailable. The plugin never converts missing data into zero percent used or one hundred percent remaining.
-`availability.json` follows the same rule: no data, or data older than 15 minutes, is `unknown`.
+`availability.json` follows the same rule: no data, data older than 15 minutes, or data stamped more than 60 seconds
+in the future, is `unknown`.

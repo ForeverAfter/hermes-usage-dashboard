@@ -107,7 +107,8 @@ Written atomically to `plugin_data_dir("usage-dashboard")/availability.json` on 
 
 - Keys are Hermes provider ids: `anthropic`, `openai-codex`, `kimi-coding`, `zai`, `nous`.
 - `ok`: more than the low threshold left (15 % by default, a setting). `low`: at or below it.
-  `exhausted`: 1 % or less. `unknown`: no data, or data older than 15 minutes.
+  `exhausted`: 1 % or less. `unknown`: no data, or data older than 15 minutes. The reader also treats a file
+  whose `generated_at` is more than 60 seconds in the future as `unknown` (a clock that was ahead).
 - The session (5 h) and weekly windows decide; model-capped windows never do. Providers with neither use their
   account-wide windows. When several windows are exhausted, `window` and `reset_at` describe the one that blocks
   longest, because that is when access actually returns.

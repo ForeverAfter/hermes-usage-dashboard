@@ -2,8 +2,8 @@
 
 The dashboard backend writes ``availability.json`` into this plugin's data directory every time it
 collects usage. This module reads it, read-only, for the ``usage_availability`` tool and the
-``/usage-availability`` command. Anything missing, corrupt or older than 15 minutes reads as
-``unknown``: availability is an optimization, never a gate.
+``/usage-availability`` command. Anything missing, corrupt, older than 15 minutes or stamped more than
+a minute in the future reads as ``unknown``: availability is an optimization, never a gate.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from typing import Any, Optional
 PLUGIN_NAME = "usage-dashboard"
 FILE_NAME = "availability.json"
 STALE_SECONDS = 900.0
+FUTURE_TOLERANCE_SECONDS = 60.0  # clock skew accepted on generated_at; beyond it the file reads as unknown
 STATES = ("ok", "low", "exhausted", "unknown")
 PROVIDER_IDS = ("anthropic", "openai-codex", "kimi-coding", "zai", "nous")
 
@@ -75,6 +76,8 @@ def load(path: Optional[Path] = None, now: Optional[datetime] = None) -> dict[st
         return document
     age = (now - generated).total_seconds()
     document["generated_at"] = raw["generated_at"]
+    if age < -FUTURE_TOLERANCE_SECONDS:
+        return document  # stamped in the future: a wrong clock, not fresh data (age_seconds stays None)
     document["age_seconds"] = max(0, int(age))
     if age > STALE_SECONDS:
         return document  # too old to trust: every provider stays unknown
@@ -119,7 +122,9 @@ def format_summary(document: dict[str, Any], now: Optional[datetime] = None) -> 
         remaining = "?" if entry["remaining_percent"] is None else f"{entry['remaining_percent']}%"
         label = "EXHAUSTED" if state == "exhausted" else state
         lines.append(f"- {provider_id}: {label} - {remaining} left{window}{_until(entry.get('reset_at'), now)}")
-    if document.get("age_seconds") is not None and document["age_seconds"] > STALE_SECONDS:
+    if document.get("age_seconds") is None:
+        lines.append("The data is timestamped in the future (clock change?), so every provider is reported as unknown.")
+    elif document["age_seconds"] > STALE_SECONDS:
         lines.append("The data is older than 15 minutes, so every provider is reported as unknown.")
     else:
         lines.append("Prefer providers marked ok; avoid exhausted ones until their reset time.")
