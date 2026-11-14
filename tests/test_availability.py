@@ -197,6 +197,41 @@ def test_reader_treats_missing_corrupt_or_old_data_as_unknown(tmp_path, monkeypa
     assert "older than 15 minutes" in plugin.availability.format_summary(stale, now=NOW)
 
 
+def test_deeply_nested_json_reads_as_unknown_in_the_reader_and_both_handlers(tmp_path, monkeypatch):
+    """N2: a RecursionError while decoding is a corrupt file, not an exception out of the reader."""
+    plugin = load_plugin_package(monkeypatch)
+    depth = 200_000  # far beyond any interpreter recursion limit
+    nested = tmp_path / "nested.json"
+    nested.write_text(
+        '{"schema": 1, "generated_at": "2026-11-06T12:00:00Z", "extra": ' + "[" * depth + "0" + "]" * depth + "}",
+        encoding="utf-8",
+    )
+    with pytest.raises(RecursionError):
+        json.loads(nested.read_text(encoding="utf-8"))  # the scenario is real on this interpreter
+    document = plugin.availability.load(nested, now=NOW)
+    assert document["generated_at"] is None and document["age_seconds"] is None
+    assert all(v["state"] == "unknown" and v["stale"] for v in document["providers"].values())
+
+    registered = {}
+
+    class Ctx:
+        def register_tool(self, **kwargs):
+            registered["tool"] = kwargs
+
+        def register_command(self, name, handler, **kwargs):
+            registered["command"] = handler
+
+    plugin.register(Ctx())
+    monkeypatch.setattr(plugin.availability, "availability_path", lambda: nested)
+    output = json.loads(registered["tool"]["handler"]({}))
+    assert "error" not in output
+    assert "No quota data yet" in output["summary"]
+    assert all(v["state"] == "unknown" for v in output["providers"].values())
+    command = registered["command"]("")
+    assert "No quota data yet" in command
+    assert "could not be read" not in command
+
+
 def test_reader_treats_a_future_timestamp_as_unknown(tmp_path, monkeypatch):
     """U5: a file stamped ahead of the clock (clock corrected later, or a stray writer) must not stay fresh."""
     plugin = load_plugin_package(monkeypatch)

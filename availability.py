@@ -80,8 +80,8 @@ def load(path: Optional[Path] = None, now: Optional[datetime] = None) -> dict[st
     }
     try:
         raw = json.loads((path or availability_path()).read_text(encoding="utf-8"))
-    except (OSError, ValueError, ImportError):
-        return document
+    except (OSError, ValueError, ImportError, RecursionError):
+        return document  # RecursionError: a pathologically nested file is corrupt data, not a crash
     if not isinstance(raw, dict) or raw.get("schema") != 1:
         return document
     generated = _parse(raw.get("generated_at"))
